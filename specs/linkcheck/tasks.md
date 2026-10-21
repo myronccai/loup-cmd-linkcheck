@@ -18,3 +18,5 @@
   - _Requirements: 4.1, 4.2, 4.3, 4.4_
 - [x] 9. Unit tests with a site in memory; end-to-end tests against a net.http.serve fixture site on 127.0.0.1
   - _Requirements: all_
+- [x] 11. Reply header fields in a CaseInsensitiveDictionary: names in any case, repeated lines joined, Content-Length sent twice; unit tests and an end-to-end crawl behind `LOCATION` and `content-type`
+  - _Requirements: 2.5_

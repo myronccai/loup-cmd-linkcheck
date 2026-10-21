@@ -159,6 +159,16 @@ same "clean: report" "linkcheck $URL/clean/
 Read 3 pages, checked 4 links: 0 broken.
 No broken links." "$(cat "$TMP/out")"
 
+# Header names in odd case: the start URL redirects with `LOCATION`, and
+# the page there comes with `content-type`; linkcheck follows the redirect
+# and reads the page.
+run "odd case" 1 -d 0 "$URL/odd-case"
+same "odd case: report" "linkcheck $URL/odd-case
+Read 1 page, checked 3 links: 1 broken.
+
+404 Not Found  $URL/odd-case/gone.html
+    linked from $URL/odd-case/" "$(cat "$TMP/out")"
+
 # The HTML report.
 run "html" 1 -q --html "$TMP/report.html" "$URL/"
 same "html: page" "$(expected report.html)" "$(cat "$TMP/report.html")"

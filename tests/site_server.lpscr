@@ -4,6 +4,8 @@
 # 127.0.0.1, answering with the files under a directory
 # (tests/fixtures/site), plus three routes that misbehave on purpose:
 # /redirect (302 to /about.html), /loop (a 302 to itself) and /error (500).
+# Under /odd-case it writes header names in odd case: the redirect from
+# /odd-case comes with `LOCATION`, the pages under it with `content-type`.
 #
 # Runtime: host.scripted. tests/e2e.sh starts it in the background with
 # `loup-bootstrap run --deny-all --allow-fs --allow-net
@@ -46,6 +48,9 @@ func respond(req: Request): Response {
     if (req.path == "/error") {
         return status(500, "Internal Server Error\n");
     }
+    if (req.path == "/odd-case") {
+        return Response(301, "", "").withHeader("LOCATION", "/odd-case/");
+    }
     if (req.path.contains("..")) {
         return status(403, "Forbidden\n");
     }
@@ -58,6 +63,9 @@ func respond(req: Request): Response {
     }
     if (!isFile(path)) {
         return not_found();
+    }
+    if (req.path.startsWith("/odd-case/")) {
+        return Response(200, "", readText(path)).withHeader("content-type", content_type(path));
     }
     return Response(200, content_type(path), readText(path));
 }

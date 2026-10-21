@@ -1,8 +1,8 @@
 @mode(host.scripted)
 
 # Unit tests for linkcheck's HTTP wire format (lib/httpwire.loup): the
-# request, the status line, header fields, chunked bodies, Content-Length,
-# bodiless replies and malformed ones.
+# request, the status line, header fields (in any case), chunked bodies,
+# Content-Length, bodiless replies and malformed ones.
 #
 # Runtime: host.scripted, run by the test runner: `make test` interprets
 # this file with Stage0 (`loup-bootstrap test --no-parallel --file
@@ -12,7 +12,7 @@
 from debug.assert import (expect, expectEq);
 from net.addressing import (Url);
 from io.streams import (ByteWriter);
-from ..lib.httpwire import (HttpReply, make_request, request_text, header_end, parse_status_line, parse_headers, dechunk, parse_reply);
+from ..lib.httpwire import (HttpReply, make_request, request_text, header_end, parse_status_line, parse_headers, dechunk, declared_length, parse_reply);
 
 func raw(text: string): bytes {
     let w = ByteWriter();
@@ -57,11 +57,22 @@ func test_status_line(): void {
 }
 
 func test_headers(): void {
-    let h = parse_headers(["Content-Type: text/html; charset=utf-8", "Set-Cookie: a=1", "set-cookie: b=2", "garbage", "X-Empty:"]);
-    expectEq(h.get("content-type") ?? "", "text/html; charset=utf-8", "case-insensitive");
-    expectEq(h.getAll("Set-Cookie").join(","), "a=1,b=2", "repeated name");
+    let h = parse_headers(["content-type: text/html; charset=utf-8", "LOCATION: /next", "Transfer-Encoding: gzip", "transfer-encoding: chunked", "garbage", "X-Empty:"]);
+    expectEq((h.get("Content-Type") ?? "") as string, "text/html; charset=utf-8", "looked up in another case");
+    expectEq((h.get("location") ?? "") as string, "/next", "and the other way round");
+    expectEq((h.get("TRANSFER-ENCODING") ?? "") as string, "gzip, chunked", "a repeated name: one list");
     expect(!h.contains("garbage"), "line without a colon");
-    expectEq(h.get("X-Empty") ?? "none", "", "empty value");
+    expectEq((h.get("X-Empty") ?? "none") as string, "", "empty value");
+    expectEq(h.keys().join(","), "content-type,LOCATION,transfer-encoding,X-Empty", "names as the server spelled them, last spelling kept");
+}
+
+func test_declared_length(): void {
+    expectEq(declared_length("42"), 42, "a number");
+    expectEq(declared_length(" 42 "), 42, "spaces around it");
+    expectEq(declared_length("42, 42"), 42, "the same length twice");
+    expectEq(declared_length("42, 43"), -1, "two lengths: none to trust");
+    expectEq(declared_length("4x"), -1, "not a number");
+    expectEq(declared_length(""), -1, "none");
 }
 
 func test_dechunk(): void {
@@ -85,6 +96,20 @@ func test_parse_reply(): void {
     expect(moved.status.isRedirect(), "redirect");
     expectEq(moved.location() ?? "", "/new", "location");
     expect(!moved.is_html(), "no type, not html");
+}
+
+# Servers write field names in any case; what linkcheck reads from them
+# does not change.
+func test_field_names_in_any_case(): void {
+    let page = reply("HTTP/1.1 200 OK\r\ncontent-type: text/html\r\ncontent-length: 5\r\n\r\nhello and more");
+    expect(page.is_html(), "content-type");
+    expectEq(page.body, "hello", "content-length");
+    let moved = reply("HTTP/1.1 302 Found\r\nLOCATION: /elsewhere\r\nCONTENT-LENGTH: 0\r\n\r\n");
+    expectEq(moved.location() ?? "", "/elsewhere", "LOCATION");
+    let chunked = reply("HTTP/1.1 200 OK\r\nTRANSFER-ENCODING: chunked\r\n\r\n3\r\nabc\r\n0\r\n\r\n");
+    expectEq(chunked.body, "abc", "TRANSFER-ENCODING");
+    expectEq(reply("HTTP/1.1 200 OK\r\nContent-Length: 3\r\nContent-Length: 3\r\n\r\nabcdef").body, "abc", "a length sent twice");
+    expectEq(reply("HTTP/1.1 200 OK\r\nContent-Length: 3\r\nContent-Length: 4\r\n\r\nabcdef").body, "abcdef", "conflicting lengths: to the end");
 }
 
 func test_bodiless_replies(): void {

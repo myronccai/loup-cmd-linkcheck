@@ -15,8 +15,10 @@ which its HTTP client is built on, works only there, and so do several of
 the language features it is there to show: `await group`, top-level
 `await`, `atomic { }` blocks, sets, generators, `?.`, `in`, and template
 fences with `{% for %}` and the `escape` filter. Its HTTP side uses
-`net.http`'s `Headers`, `HttpStatus` and `Request`; the tests serve a
-fixture site with `net.http.serve` on 127.0.0.1.
+`net.http`'s `Headers`, `HttpStatus` and `Request`, and keeps a reply's
+header fields in a `structures.case_insensitive_dict`
+`CaseInsensitiveDictionary`; the tests serve a fixture site with
+`net.http.serve` on 127.0.0.1.
 
 ## Requirements
 
@@ -61,6 +63,10 @@ every link on it checked so that no visitor meets a dead link.
    read them for links. Without it they are counted as skipped.
 4. THE checker SHALL count `https://` and other non-HTTP links as skipped
    (Loup 1.26.0 has no TLS), and refuse an `https://` start URL.
+5. THE checker SHALL read a reply's header field names in any case
+   (`Location`, `LOCATION`, `content-type`), take repeated field lines as
+   one comma-separated list, and trust a `Content-Length` sent twice only
+   when both lengths agree.
 
 ### Requirement 3: Concurrency
 

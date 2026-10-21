@@ -34,7 +34,7 @@ mistakes. Load those only as needed.
 │   ├── args.loup                # OPTION_SPECS, struct Options, parse_args(), find_long(), find_short(), parse_count()
 │   ├── usage.loup               # usage(), version_line()
 │   ├── urls.loup                # enum LinkTarget, normalize(), origin_key(), origin_of(), classify(), resolve_text(), start_url_problem()
-│   ├── httpwire.loup            # class HttpReply, make_request(), request_text(), parse_reply() and its parts, dechunk()
+│   ├── httpwire.loup            # class HttpReply (fields: CaseInsensitiveDictionary), make_request(), request_text(), parse_reply() and its parts
 │   ├── links.lpscr              # struct Link, gen func links_in(), decode_entities()
 │   ├── fetch.lpscr              # interface Fetcher, class HttpFetcher (net.tcp), io_reason()
 │   ├── crawler.lpscr            # CrawlSettings, Outcome, BrokenLink, Summary, class Crawler
@@ -42,7 +42,7 @@ mistakes. Load those only as needed.
 ├── tests/
 │   ├── *_test.lpscr             # unit tests: func test_*() and async func test_*() (no sockets)
 │   ├── fakesite.lpscr           # FakeSite: a Fetcher that serves a site from memory
-│   ├── site_server.lpscr        # net.http.serve over tests/fixtures/site, plus /redirect, /loop, /error
+│   ├── site_server.lpscr        # net.http.serve over tests/fixtures/site, plus /redirect, /loop, /error, /odd-case
 │   ├── e2e.sh                   # end-to-end: linkcheck against site_server on 127.0.0.1
 │   ├── expected/                # expected reports (@URL@ is the server's address)
 │   └── fixtures/site/           # the test site

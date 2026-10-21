@@ -2,8 +2,9 @@
 
 # linkcheck's side of HTTP/1.1: the request it sends and the reading of the
 # reply, built on net.http's types (Request, Headers, HttpStatus,
-# HttpVersion). net.http itself is a server; the client is these functions
-# over net.tcp (lib/fetch.lpscr).
+# HttpVersion) and, for the reply's header fields, a
+# CaseInsensitiveDictionary. net.http itself is a server; the client is
+# these functions over net.tcp (lib/fetch.lpscr).
 #
 # Runtime: host.dual, but only ever interpreted here, by Stage0:
 # lib/fetch.lpscr and lib/crawler.lpscr import it under
@@ -12,29 +13,38 @@
 #
 # Structure: HttpReply; make_request() and request_text() for the way out;
 # then the reply, bottom up: header_end(), parse_status_line(),
-# parse_headers(), dechunk() and parse_reply(), which puts them together.
+# header_fields() and parse_headers(), dechunk(), declared_length() and
+# parse_reply(), which puts them together.
 # Replies are read as bytes, because chunk sizes and Content-Length count
 # bytes; the body is decoded as UTF-8 at the end.
 
 from net.http import (Headers, HttpStatus, HttpVersion, Request);
 from net.addressing import (Url, defaultPort);
+from structures.case_insensitive_dict import (CaseInsensitiveDictionary);
 from .urls import (host_text);
 
 ## A reply as linkcheck uses it: the status, the header fields and the body
-## as text.
+## as text. Field names are case-insensitive (servers send `content-type`
+## or `LOCATION` as well as `Content-Type`), so the fields are a
+## CaseInsensitiveDictionary of name to value, one value per name, which
+## keeps each name as the server spelled it.
 pub class HttpReply {
     pub let status: HttpStatus;
-    pub let headers: Headers;
+    pub let fields: CaseInsensitiveDictionary;
     pub let body: string;
 
-    pub func constructor(status: HttpStatus, headers: Headers, body: string) {
+    pub func constructor(status: HttpStatus, fields: CaseInsensitiveDictionary, body: string) {
         this.status = status;
-        this.headers = headers;
+        this.fields = fields;
         this.body = body;
     }
 
+    ## The value of the field `name`, whatever its case in the reply.
     pub func header(name: string): Option[string] {
-        return this.headers.get(name);
+        return match this.fields.get(name) {
+            Some(value) => Some(value as string),
+            None => None,
+        };
     }
 
     ## The media type: Content-Type without its parameters, lower-cased
@@ -121,17 +131,45 @@ pub func parse_status_line(line: string): Result[(int, string), string] {
     return Ok((parts[1].toInt(), reason));
 }
 
+## Header fields from (name, value) pairs. A name that comes again, in any
+## case, adds its value to the first one's after a comma, as HTTP allows
+## for fields that are lists (RFC 9110, 5.3): two `Transfer-Encoding`
+## lines read as one list.
+pub func header_fields(pairs: list[(string, string)]): CaseInsensitiveDictionary {
+    let fields = CaseInsensitiveDictionary();
+    for (pair in pairs) {
+        let (name, value) = pair;
+        match fields.get(name) {
+            Some(earlier) => {
+                fields.set(name, (earlier as string) + ", " + value);
+            },
+            None => {
+                fields.set(name, value);
+            },
+        }
+    }
+    return fields;
+}
+
+# The value of the field `name`, or "" when the reply has none.
+func field_text(fields: CaseInsensitiveDictionary, name: string): string {
+    return match fields.get(name) {
+        Some(value) => value as string,
+        None => "",
+    };
+}
+
 ## The header fields of the lines after the status line; a line without a
-## colon is skipped, a repeated name keeps every value.
-pub func parse_headers(lines: list[string]): Headers {
-    let headers = Headers();
+## colon is skipped.
+pub func parse_headers(lines: list[string]): CaseInsensitiveDictionary {
+    var pairs: list[(string, string)] = [];
     for (line in lines) {
         let colon = line.index_of(":");
         if (colon > 0) {
-            headers.append(line.slice(0, colon).trim(), line.slice(colon + 1).trim());
+            pairs.push((line.slice(0, colon).trim(), line.slice(colon + 1).trim()));
         }
     }
-    return headers;
+    return header_fields(pairs);
 }
 
 # The value of a hexadecimal chunk size, or -1.
@@ -197,6 +235,31 @@ pub func dechunk(body: bytes): Result[bytes, string] {
     return Ok(bytesFromInts(out));
 }
 
+## The body length a Content-Length value declares, or -1 when it declares
+## none that can be trusted. Repeated lines arrive joined (`42, 42`): equal
+## values count as one (RFC 9112, 6.3), different ones as none; so does a
+## value that is not a number.
+pub func declared_length(value: string): int {
+    var length = -1;
+    for (part in value.split(",")) {
+        let digits = part.trim();
+        if (digits.len() == 0 or digits.len() >= 10) {
+            return -1;
+        }
+        for (ch in digits) {
+            if (ch < "0" or ch > "9") {
+                return -1;
+            }
+        }
+        let n = digits.toInt();
+        if (length >= 0 and n != length) {
+            return -1;
+        }
+        length = n;
+    }
+    return length;
+}
+
 ## A whole raw reply as an HttpReply. `with_body` is false for a reply to
 ## HEAD, which has none whatever its headers say; so are 1xx, 204 and 304
 ## replies.
@@ -210,7 +273,7 @@ pub func parse_reply(raw: bytes, with_body: bool): Result[HttpReply, string] {
     }
     let lines = raw.slice(0, end).decode().replace("\r", "").split("\n");
     let (code, phrase) = parse_status_line(lines[0])?;
-    let headers = parse_headers(lines.slice(1));
+    let fields = parse_headers(lines.slice(1));
     let status = HttpStatus(code);
     if (status.reason == "Unknown" and phrase.len() > 0) {
         safe { status.reason = phrase; }
@@ -220,16 +283,13 @@ pub func parse_reply(raw: bytes, with_body: bool): Result[HttpReply, string] {
     let bodiless = !with_body or status.isInformational() or code == 204 or code == 304;
     if (bodiless) {
         body = b"";
-    } else if ((headers.get("Transfer-Encoding") ?? "").toLowerCase().contains("chunked")) {
+    } else if (field_text(fields, "Transfer-Encoding").toLowerCase().contains("chunked")) {
         body = dechunk(body)?;
     } else {
-        let declared = (headers.get("Content-Length") ?? "").trim();
-        if (declared.len() > 0 and declared.len() < 10) {
-            let n = declared.toInt();
-            if (n >= 0 and n < body.len()) {
-                body = body.slice(0, n);
-            }
+        let n = declared_length(field_text(fields, "Content-Length"));
+        if (n >= 0 and n < body.len()) {
+            body = body.slice(0, n);
         }
     }
-    return Ok(HttpReply(status, headers, body.decode()));
+    return Ok(HttpReply(status, fields, body.decode()));
 }

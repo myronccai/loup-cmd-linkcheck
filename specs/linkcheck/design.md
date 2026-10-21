@@ -51,9 +51,18 @@ reads until the server closes (at most 8 MiB, into an `io.streams`
 with the system's reason (`Connection refused`). `parse_reply` works on
 bytes: it finds the blank line, parses the status line into an
 `HttpStatus` (keeping the server's phrase for a code `net.http` does not
-know) and the header fields into `Headers`, then takes the body: none for
-`HEAD`, 1xx, 204 and 304; de-chunked for `Transfer-Encoding: chunked`; cut
-to `Content-Length` otherwise.
+know) and the header fields into a `CaseInsensitiveDictionary`
+(`header_fields`), then takes the body: none for `HEAD`, 1xx, 204 and 304;
+de-chunked for `Transfer-Encoding: chunked`; cut to `Content-Length`
+otherwise. Field names are case-insensitive, and servers do send
+`content-type` or `LOCATION`: the dictionary finds a field in any case and
+keeps the server's spelling. It holds one value per name, so repeated
+lines are joined with `, ` (RFC 9110, 5.3): `Transfer-Encoding: gzip` and
+`transfer-encoding: chunked` read as `gzip, chunked`, and a
+`Content-Length` sent twice (`42, 42`) counts when both agree
+(`declared_length`; RFC 9112, 6.3), while two different lengths, like a
+length that is not a number, are ignored and the body runs to the end of
+the connection.
 
 ### Crawling
 

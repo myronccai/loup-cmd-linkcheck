@@ -9,9 +9,9 @@
 # (`loup-bootstrap test --no-parallel --file ...`). It opens no socket.
 # Not part of the program.
 
-from net.http import (Headers, HttpStatus);
+from net.http import (HttpStatus);
 from ..lib.fetch import (Fetcher);
-from ..lib.httpwire import (HttpReply);
+from ..lib.httpwire import (HttpReply, header_fields);
 
 pub class FakeSite implements Fetcher {
     # Replies by "METHOD URL" (for one method only) or by URL.
@@ -23,7 +23,7 @@ pub class FakeSite implements Fetcher {
     pub func constructor() {}
 
     func put(key: string, code: int, fields: list[(string, string)], body: string): void {
-        this.replies[key] = HttpReply(HttpStatus(code), Headers.fromPairs(fields), body);
+        this.replies[key] = HttpReply(HttpStatus(code), header_fields(fields), body);
     }
 
     pub func page(url: string, html: string): void {
@@ -61,7 +61,7 @@ pub class FakeSite implements Fetcher {
         }
         return match this.replies.get(url) {
             Some(reply) => Ok(reply),
-            None => Ok(HttpReply(HttpStatus(404), Headers(), "")),
+            None => Ok(HttpReply(HttpStatus(404), header_fields([]), "")),
         };
     }
 }

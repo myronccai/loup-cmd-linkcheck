@@ -219,6 +219,12 @@ grant or an HTML report that cannot be written.
   (`isRedirect()`, the reason phrase). `lib/httpwire.loup` reads replies as
   bytes, with `Content-Length` and chunked bodies. The tests serve their
   site with `net.http.serve`.
+- **`structures.case_insensitive_dict`.** Header field names are
+  case-insensitive, so a reply's fields are a `CaseInsensitiveDictionary`:
+  `Location`, `Content-Type`, `Content-Length` and `Transfer-Encoding` are
+  found however the server wrote them (the end-to-end tests crawl a page
+  reached through `LOCATION` and served with `content-type`), and
+  repeated field lines join into one list.
 - **`async`/`await` and `await group`.** The crawler works level by level:
   for each level an `await group` spawns the workers, which take URLs from
   a shared queue, and ends when they have all found it empty, so the next
