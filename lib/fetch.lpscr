@@ -1,0 +1,110 @@
+@mode(host.scripted)
+
+# linkcheck's HTTP client: one request per connection over net.tcp, behind
+# the Fetcher interface so that the crawler can be tested with a site held
+# in memory.
+#
+# Runtime: host.scripted. A module of the script bin/linkcheck.lpscr,
+# interpreted with it by Stage0 (`loup-bootstrap run --allow-net`):
+# `net.tcp` exists only there, and only with the `net` capability granted.
+# The unit tests use their own Fetcher and open no socket.
+#
+# Structure: the Fetcher interface; HttpFetcher, which connects, sends the
+# request from lib/httpwire.loup, reads the reply to the end of the
+# connection (it asked for `Connection: close`) and parses it.
+
+from net.tcp import (connect);
+from net.addressing import (Url, AddressingError);
+from io.streams import (ByteWriter);
+from .appinfo import (MAX_RESPONSE_BYTES);
+from .httpwire import (HttpReply, make_request, request_text, parse_reply);
+
+const CHUNK: int = 16384;
+
+## Something that answers HTTP requests. The error of the Result says why
+## there was no reply at all (`Connection refused`); an HTTP error status is
+## a reply.
+pub interface Fetcher {
+    async func fetch(method: string, url: string): Task[Result[HttpReply, string]];
+}
+
+# The system's reason at the end of a runtime IoError message:
+# "tcp_connect failed on 'h:1': Connection refused (os error 111)" gives
+# "Connection refused".
+pub func io_reason(message: string): string {
+    var reason = message;
+    let quoted = message.lastIndexOf("': ");
+    if (quoted >= 0) {
+        reason = message.slice(quoted + 3);
+    }
+    let lookup = "failed to lookup address information: ";
+    if (reason.startsWith(lookup)) {
+        reason = reason.slice(lookup.len());
+    }
+    let os = reason.lastIndexOf(" (os error ");
+    if (os > 0) {
+        reason = reason.slice(0, os);
+    }
+    return reason;
+}
+
+## The real thing: HTTP/1.1 over a TCP connection per request.
+pub class HttpFetcher implements Fetcher {
+    let agent: string;
+
+    pub func constructor(agent: string) {
+        this.agent = agent;
+    }
+
+    pub async func fetch(method: string, url: string): Task[Result[HttpReply, string]] {
+        var target: Option[Url] = None;
+        try {
+            target = Some(Url.parse(url));
+        } catch (AddressingError as e) {
+            return Err("malformed URL");
+        }
+        let u = target.unwrap();
+        if (u.scheme != "http") {
+            return Err(i"{$ u.scheme $} is not supported");
+        }
+        let request = request_text(make_request(method, u, this.agent));
+        try {
+            let sock = connect(u.hostName(), u.effectivePort());
+            # The reply, read until the server closes the connection (or
+            # until there is more than linkcheck needs).
+            let received = ByteWriter();
+            try {
+                write_all(sock, encoded(request));
+                while (received.len() < MAX_RESPONSE_BYTES) {
+                    let chunk = sock.read(CHUNK);
+                    if (chunk.len() == 0) {
+                        break;
+                    }
+                    received.writeBytes(chunk);
+                }
+            } finally {
+                sock.close();
+            }
+            let raw = received.toBytes();
+            return parse_reply(raw, method != "HEAD");
+        } catch (IoError as e) {
+            return Err(io_reason(e.message));
+        }
+    }
+}
+
+# The UTF-8 bytes of `text` (a request is ASCII, but a path need not be).
+func encoded(text: string): bytes {
+    let w = ByteWriter();
+    w.writeString(text);
+    return w.toBytes();
+}
+
+# TcpSocket.write() may take only part of the data: write until all is out.
+func write_all(sock: TcpSocket, data: bytes): void {
+    var written = 0;
+    while (written < data.len()) {
+        let rest = if (written == 0) { data } else { data.slice(written, data.len()) };
+        written += sock.write(rest);
+    }
+}

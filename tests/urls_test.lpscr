@@ -1,0 +1,86 @@
+@mode(host.scripted)
+
+# Unit tests for linkcheck's URL handling (lib/urls.loup): the one spelling
+# of a URL, origins, schemes, what a link points at, and the start URL's
+# checks.
+#
+# Runtime: host.scripted, run by the test runner: `make test` interprets
+# this file with Stage0 (`loup-bootstrap test --no-parallel --file
+# tests/urls_test.lpscr`), one test per `func test_*()`. It imports lib/ by
+# relative path; it is not part of the program.
+
+from debug.assert import (expect, expectEq);
+from net.addressing import (Url);
+from ..lib.urls import (LinkTarget, normalize, origin_key, origin_of, scheme_of, classify, resolve_text, start_url_problem);
+
+func norm(text: string): string {
+    return normalize(Url.parse(text));
+}
+
+# A classification as text, for comparing.
+func target(base: string, reference: string): string {
+    return match classify(Url.parse(base), reference) {
+        LinkTarget.Ignored => "ignored",
+        LinkTarget.Malformed(text) => "malformed " + text,
+        LinkTarget.Unsupported(url) => "unsupported " + url,
+        LinkTarget.Web(url) => "web " + url,
+    };
+}
+
+func test_normalize(): void {
+    expectEq(norm("http://Example.COM"), "http://example.com/", "host case, empty path");
+    expectEq(norm("HTTP://h:80/a"), "http://h/a", "default port dropped");
+    expectEq(norm("http://h:8080/a?b=1#c"), "http://h:8080/a?b=1", "fragment dropped");
+    expectEq(norm("http://h/a/./b/../c"), "http://h/a/c", "dot segments");
+    expectEq(norm("http://127.0.0.1:9000/x/"), "http://127.0.0.1:9000/x/", "trailing slash kept");
+}
+
+func test_origins(): void {
+    expectEq(origin_key(Url.parse("http://h/x")), "http://h:80", "default port written");
+    expectEq(origin_of("http://h:80/y"), origin_of("http://h/z"), "same site");
+    expect(origin_of("http://h:81/") != origin_of("http://h/"), "another port is another site");
+    expect(origin_of("https://h/") != origin_of("http://h/"), "another scheme too");
+    expectEq(origin_of("nonsense"), "", "not a URL");
+}
+
+func test_scheme_of(): void {
+    expectEq(scheme_of("mailto:a@b"), "mailto", "mailto");
+    expectEq(scheme_of("JavaScript:void(0)"), "javascript", "lower-cased");
+    expectEq(scheme_of("about.html"), "", "relative");
+    expectEq(scheme_of("/a:b"), "", "colon in the path");
+    expectEq(scheme_of("a/b:c"), "", "slash before the colon");
+    expectEq(scheme_of("1http://x"), "", "starts with a digit");
+}
+
+func test_classify(): void {
+    let page = "http://h:8000/docs/index.html";
+    expectEq(target(page, "guide.html"), "web http://h:8000/docs/guide.html", "relative");
+    expectEq(target(page, "../index.html#top"), "web http://h:8000/index.html", "up, fragment dropped");
+    expectEq(target(page, "/a b.html"), "web http://h:8000/a b.html", "kept as written");
+    expectEq(target(page, " ?q=1 "), "web http://h:8000/docs/index.html?q=1", "query only, trimmed");
+    expectEq(target(page, "//other.example/x"), "web http://other.example/x", "scheme-relative");
+    expectEq(target(page, "https://h/secure"), "unsupported https://h/secure", "https");
+    expectEq(target(page, "ftp://files.example/f"), "unsupported ftp://files.example/f", "ftp");
+    expectEq(target(page, "mailto:x@y"), "ignored", "mailto");
+    expectEq(target(page, "tel:+123"), "ignored", "tel");
+    expectEq(target(page, "javascript:go()"), "ignored", "javascript");
+    expectEq(target(page, "data:text/plain,hi"), "ignored", "data");
+    expectEq(target(page, "#section"), "ignored", "fragment only");
+    expectEq(target(page, "   "), "ignored", "blank");
+    expectEq(target(page, "http://[::1"), "malformed http://[::1", "unclosed bracket");
+}
+
+func test_resolve_text(): void {
+    expectEq(resolve_text("http://h/a/b", "/c") ?? "none", "http://h/c", "absolute path");
+    expectEq(resolve_text("http://h/a/b", "c") ?? "none", "http://h/a/c", "relative");
+    expectEq(resolve_text("http://h/a/b", "http://g/") ?? "none", "http://g/", "absolute URL");
+    expect(resolve_text("not a url", "x").is_none(), "bad base");
+}
+
+func test_start_url(): void {
+    expect(start_url_problem("http://127.0.0.1:8000/").is_none(), "fine");
+    expectEq(start_url_problem("example.org") ?? "", "not an absolute URL: 'example.org'", "no scheme");
+    expectEq(start_url_problem("https://example.org/") ?? "", "https is not supported (Loup 1.26.0 has no TLS): 'https://example.org/'", "https");
+    expectEq(start_url_problem("file:///tmp/x.html") ?? "", "not an http URL: 'file:///tmp/x.html'", "file");
+    expectEq(start_url_problem("http:/x") ?? "", "no host in 'http:/x'", "no host");
+}

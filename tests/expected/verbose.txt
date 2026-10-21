@@ -1,0 +1,17 @@
+200 OK: @URL@/
+200 OK: @URL@/style.css
+200 OK: @URL@/app.js
+200 OK: @URL@/logo.svg
+404 Not Found: @URL@/img/missing.png
+200 OK: @URL@/about.html
+200 OK: @URL@/about.html?from=home&lang=en
+200 OK: @URL@/docs/
+404 Not Found: @URL@/missing.html
+200 OK: @URL@/redirect (redirected to @URL@/about.html)
+error: too many redirects: @URL@/loop (redirected to @URL@/loop)
+500 Internal Server Error: @URL@/error
+200 OK: @URL@/docs/guide.html
+200 OK: @URL@/index.html
+404 Not Found: @URL@/docs/diagram.svg
+200 OK: @URL@/docs/deep/one.html
+404 Not Found: @URL@/docs/deep/two.html

@@ -1,0 +1,28 @@
+linkcheck @URL@/
+Read 7 pages, checked 17 links: 6 broken, 3 skipped (2 external, 1 not http), 3 ignored.
+
+404 Not Found  @URL@/docs/deep/two.html
+    linked from @URL@/docs/deep/one.html
+
+404 Not Found  @URL@/docs/diagram.svg
+    linked from @URL@/docs/
+
+500 Internal Server Error  @URL@/error
+    linked from @URL@/
+    linked from @URL@/index.html
+
+404 Not Found  @URL@/img/missing.png
+    linked from @URL@/
+    linked from @URL@/index.html
+
+error: too many redirects  @URL@/loop
+    linked from @URL@/
+    linked from @URL@/index.html
+
+404 Not Found  @URL@/missing.html
+    linked from @URL@/
+    linked from @URL@/about.html
+    linked from @URL@/about.html?from=home&lang=en
+    linked from @URL@/index.html
+
+Links to other sites were not checked (--external checks them).

@@ -1,0 +1,105 @@
+@mode(host.scripted)
+
+# Unit tests for linkcheck's command-line parser (lib/args.loup): short and
+# long options, values in every spelling, abbreviations, repeated options,
+# the URL operand, and the usage errors.
+#
+# Runtime: host.scripted, run by the test runner: `make test` interprets
+# this file with Stage0 (`loup-bootstrap test --no-parallel --file
+# tests/args_test.lpscr`), one test per `func test_*()`. It imports lib/ by
+# relative path; it is not part of the program.
+
+from debug.assert import (expect, expectEq);
+from ..lib.args import (Options, UNLIMITED, parse_args, parse_count, find_long, find_short);
+from ..lib.usage import (usage, version_line);
+
+func ok(argv: list[string]): Options {
+    let parsed = parse_args(argv);
+    expect(parsed.is_ok(), "parses: " + argv.join(" "));
+    return parsed.unwrap();
+}
+
+func err(argv: list[string]): string {
+    return match parse_args(argv) {
+        Ok(o) => "parsed",
+        Err(message) => message,
+    };
+}
+
+func test_defaults(): void {
+    let o = ok(["http://h/"]);
+    expectEq(o.url, "http://h/", "url");
+    expectEq(o.max_depth, UNLIMITED, "no depth limit");
+    expectEq(o.concurrency, 4, "four workers");
+    expect(!o.external and !o.quiet and !o.verbose, "flags off");
+    expectEq(o.excludes.len(), 0, "no excludes");
+    expectEq(o.html_file, "", "no html");
+}
+
+func test_short_options(): void {
+    let o = ok(["-d", "2", "-c8", "-evq", "-o", "r.html", "http://h/"]);
+    expectEq(o.max_depth, 2, "-d 2");
+    expectEq(o.concurrency, 8, "-c8");
+    expect(o.external and o.verbose and o.quiet, "cluster");
+    expectEq(o.html_file, "r.html", "-o");
+    expectEq(ok(["-qd1", "http://h/"]).max_depth, 1, "a value ends a cluster");
+}
+
+func test_long_options(): void {
+    let o = ok(["--max-depth=3", "--concurrency", "2", "--external", "--html=out.html", "http://h/"]);
+    expectEq(o.max_depth, 3, "--max-depth=3");
+    expectEq(o.concurrency, 2, "--concurrency 2");
+    expect(o.external, "--external");
+    expectEq(o.html_file, "out.html", "--html=");
+    expectEq(ok(["--max=1", "http://h/"]).max_depth, 1, "abbreviated");
+    expect(ok(["--verb", "http://h/"]).verbose, "abbreviated flag");
+}
+
+func test_repeated_and_late_options(): void {
+    let o = ok(["-x", "http://h/private", "http://h/", "--exclude=http://h/tmp", "-d", "1", "-d", "4"]);
+    expectEq(o.excludes.join(" "), "http://h/private http://h/tmp", "excludes collect");
+    expectEq(o.max_depth, 4, "the last value wins");
+    expectEq(o.url, "http://h/", "options after the URL");
+    expectEq(ok(["--", "-weird-but-a-url"]).url, "-weird-but-a-url", "-- ends the options");
+}
+
+func test_help_and_version(): void {
+    expect(ok(["-h"]).help, "-h");
+    expect(ok(["--help"]).help, "--help");
+    expect(ok(["-V"]).version, "-V");
+    expect(ok(["--version", "--max-depth=x"]).version, "version before value checks");
+    expect(usage().startsWith("usage: linkcheck [OPTION]... URL"), "usage line");
+    expect(usage().contains("  -d, --max-depth N"), "usage lists --max-depth");
+    expectEq(version_line(), "linkcheck (loup-cmd-linkcheck) 0.1.0", "version line");
+}
+
+func test_errors(): void {
+    expectEq(err([]), "missing URL", "no URL");
+    expectEq(err(["http://a/", "http://b/"]), "extra operand 'http://b/'", "two URLs");
+    expectEq(err(["-Z", "http://h/"]), "invalid option -- 'Z'", "unknown letter");
+    expectEq(err(["--bogus", "http://h/"]), "unrecognized option '--bogus'", "unknown long");
+    expectEq(err(["--ex", "http://h/"]), "option '--ex' is ambiguous; possibilities: '--external' '--exclude'", "ambiguous");
+    expectEq(err(["--quiet=yes", "http://h/"]), "option '--quiet' doesn't allow an argument", "flag with a value");
+    expectEq(err(["http://h/", "--html"]), "option '--html' requires an argument", "long without value");
+    expectEq(err(["http://h/", "-d"]), "option requires an argument -- 'd'", "short without value");
+    expectEq(err(["-d", "x", "http://h/"]), "invalid depth: 'x'", "bad depth");
+    expectEq(err(["-c", "0", "http://h/"]), "invalid concurrency: '0' (1 to 64)", "no workers");
+    expectEq(err(["-c", "65", "http://h/"]), "invalid concurrency: '65' (1 to 64)", "too many workers");
+    expectEq(err(["--html=", "http://h/"]), "--html needs a file name", "empty file name");
+}
+
+func test_lookups(): void {
+    expectEq(find_long("concurrency").unwrap().letter, "c", "exact");
+    expectEq(find_long("c").unwrap().name, "concurrency", "one-letter prefix");
+    expect(find_long("e").is_err(), "e is ambiguous");
+    expectEq(find_short("x").unwrap().name, "exclude", "short");
+    expect(find_short("y").is_none(), "no -y");
+}
+
+func test_parse_count(): void {
+    expectEq(parse_count("0", "depth", 0, 9).unwrap(), 0, "low end");
+    expectEq(parse_count("09", "depth", 0, 9).unwrap(), 9, "leading zero");
+    expect(parse_count("-1", "depth", 0, 9).is_err(), "negative");
+    expect(parse_count("", "depth", 0, 9).is_err(), "empty");
+    expect(parse_count("1234567890", "depth", 0, 2000000000).is_err(), "too long");
+}

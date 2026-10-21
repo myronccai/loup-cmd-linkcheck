@@ -1,0 +1,151 @@
+@mode(host.dual)
+
+# linkcheck's URL handling, on net.addressing's Url: one spelling per URL
+# (so that each is checked once), origins, and what kind of target a link
+# found on a page is.
+#
+# Runtime: host.dual, but only ever interpreted here, by Stage0:
+# bin/linkcheck.lpscr and lib/crawler.lpscr import it under
+# `loup-bootstrap run --allow-net`, and tests/urls_test.lpscr under
+# `loup-bootstrap test`. Nothing in this project compiles it.
+
+from net.addressing import (Url, AddressingError, defaultPort);
+
+## Schemes whose links are not resources to check (`mailto:` opens a mail
+## program, `javascript:` runs code, `data:` carries its own content).
+pub let IGNORED_SCHEMES: list[string] = ["mailto", "tel", "javascript", "data"];
+
+## What a reference on a page points at.
+pub enum LinkTarget {
+    # Nothing to check: an ignored scheme, or an empty or fragment-only
+    # reference (the page itself).
+    Ignored,
+    # The reference cannot be resolved; the payload is the reference.
+    Malformed(string),
+    # A URL linkcheck cannot fetch (https:, ftp:, ...), normalized.
+    Unsupported(string),
+    # An http URL, normalized: a link to check.
+    Web(string),
+}
+
+## The host as written in a URL (an IPv6 address keeps its brackets).
+pub func host_text(u: Url): string {
+    return match u.host {
+        Some(h) => h.toString(),
+        None => "",
+    };
+}
+
+## The URL's one spelling: no fragment, no default port, a lower-case scheme
+## and host (Url.parse does those two), "/" for an empty path, dot segments
+## removed.
+pub func normalize(u: Url): string {
+    var out = u.scheme + "://" + host_text(u);
+    match u.port {
+        Some(p) => {
+            if (p != defaultPort(u.scheme)) {
+                out += ":" + str(p);
+            }
+        },
+        None => {},
+    }
+    out += if (u.path.len() == 0) { "/" } else { u.urlPath().normalize().toString() };
+    match u.query {
+        Some(q) => { out += "?" + q; },
+        None => {},
+    }
+    return out;
+}
+
+## `scheme://host:port`, with the port always written: two URLs are on the
+## same site when their origins are equal.
+pub func origin_key(u: Url): string {
+    return i"{$ u.scheme $}://{$ host_text(u) $}:{$ u.effectivePort() $}";
+}
+
+## The origin of a URL given as text ("" when it does not parse).
+pub func origin_of(url: string): string {
+    try {
+        return origin_key(Url.parse(url));
+    } catch (AddressingError as e) {
+        return "";
+    }
+}
+
+## The scheme a reference starts with, lower-cased, or "" for a relative
+## reference (`about.html`, `/x`, `//host/x`, `?q`).
+pub func scheme_of(reference: string): string {
+    let colon = reference.index_of(":");
+    if (colon <= 0) {
+        return "";
+    }
+    let candidate = reference.slice(0, colon);
+    var first = true;
+    for (ch in candidate) {
+        let letter = (ch >= "a" and ch <= "z") or (ch >= "A" and ch <= "Z");
+        let other = (ch >= "0" and ch <= "9") or ch == "+" or ch == "-" or ch == ".";
+        if (!letter and (first or !other)) {
+            return "";
+        }
+        first = false;
+    }
+    return candidate.toLowerCase();
+}
+
+## What `reference`, found on a page whose base URL is `base`, points at.
+pub func classify(base: Url, reference: string): LinkTarget {
+    let text = reference.trim();
+    if (text.len() == 0 or text.startsWith("#")) {
+        return LinkTarget.Ignored;
+    }
+    let scheme = scheme_of(text);
+    if (IGNORED_SCHEMES.contains(scheme)) {
+        return LinkTarget.Ignored;
+    }
+    var resolved: Option[Url] = None;
+    try {
+        resolved = Some(base.resolve(text));
+    } catch (AddressingError as e) {
+        return LinkTarget.Malformed(text);
+    }
+    let u = resolved.unwrap();
+    if (u.scheme != "http") {
+        return LinkTarget.Unsupported(normalize(u));
+    }
+    if (host_text(u).len() == 0) {
+        return LinkTarget.Malformed(text);
+    }
+    return LinkTarget.Web(normalize(u));
+}
+
+## `reference` (a Location header, a `<base href>`) resolved against the
+## URL `page`, normalized; None when either does not parse.
+pub func resolve_text(page: string, reference: string): Option[string] {
+    try {
+        return Some(normalize(Url.parse(page).resolve(reference.trim())));
+    } catch (AddressingError as e) {
+        return None;
+    }
+}
+
+## Why `text` cannot be the start URL, or None when it can: it must be an
+## absolute `http://` URL with a host.
+pub func start_url_problem(text: string): Option[string] {
+    var parsed: Option[Url] = None;
+    try {
+        parsed = Some(Url.parse(text));
+    } catch (AddressingError as e) {
+        return Some(i"not an absolute URL: '{$ text $}'");
+    }
+    let u = parsed.unwrap();
+    if (u.scheme == "https") {
+        return Some(i"https is not supported (Loup 1.26.0 has no TLS): '{$ text $}'");
+    }
+    if (u.scheme != "http") {
+        return Some(i"not an http URL: '{$ text $}'");
+    }
+    if (host_text(u).len() == 0) {
+        return Some(i"no host in '{$ text $}'");
+    }
+    return None;
+}

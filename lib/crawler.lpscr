@@ -1,0 +1,388 @@
+@mode(host.scripted)
+
+# linkcheck's crawler: reads the site level by level, with a group of
+# worker tasks per level sharing one queue, checks every distinct URL once,
+# and keeps what it learns (outcomes, broken links, the pages that link to
+# each URL, what was skipped) for the reports.
+#
+# Runtime: host.scripted. A module of the script bin/linkcheck.lpscr,
+# interpreted with it by Stage0 (`loup-bootstrap run --allow-net`), and
+# imported by tests/crawler_test.lpscr under `loup-bootstrap test` with a
+# Fetcher that serves a site from memory. A script module because it uses
+# what only Stage0 runs: `await group`, `atomic { }`, sets, `in` and `?.`.
+#
+# Structure: the settings and result types; then Crawler: crawl() runs the
+# levels, work() is one worker, visit() checks a URL and reads it when it is
+# a page of the site, found() and note() deal with each link on a page, and
+# check() follows redirects. Last, summary() sorts it all for the reports.
+#
+# Concurrency: the workers of a level are tasks of one `await group`, which
+# ends when every worker has found the queue empty; only then does the next
+# level start, so depths are exact. Whatever a worker reads and then changes
+# in shared state (the queue, the set of known URLs, the outcomes) happens
+# in an `atomic { }` block, which no other task can interleave with. Loup
+# 1.26.0 runs the tasks one after another, but the code does not rely on it.
+
+from net.addressing import (Url);
+from .appinfo import (MAX_REDIRECTS);
+from .args import (UNLIMITED);
+from .httpwire import (HttpReply);
+from .urls import (LinkTarget, classify, normalize, origin_of, resolve_text);
+from .links import (Link, links_in);
+from .fetch import (Fetcher);
+
+pub struct CrawlSettings {
+    # How many links away from the start page pages are still read, or
+    # UNLIMITED.
+    pub max_depth: int;
+    pub workers: int;
+    pub external: bool;
+    pub excludes: list[string];
+    pub verbose: bool;
+}
+
+## What became of one URL. `status` is the final HTTP status after
+## redirects, or 0 when no reply came; `reason` is the status's phrase or
+## why there was no reply.
+pub class Outcome {
+    pub let url: string;
+    pub let status: int;
+    pub let reason: string;
+    pub let final_url: string;
+    pub let redirects: int;
+
+    pub func constructor(url: string, status: int, reason: string, final_url: string, redirects: int) {
+        this.url = url;
+        this.status = status;
+        this.reason = reason;
+        this.final_url = final_url;
+        this.redirects = redirects;
+    }
+
+    pub func is_broken(): bool {
+        return this.status == 0 or this.status >= 400;
+    }
+
+    ## `404 Not Found`, or `error: Connection refused`.
+    pub func label(): string {
+        if (this.status == 0) {
+            return "error: " + this.reason;
+        }
+        return i"{$ this.status $} {$ this.reason $}";
+    }
+}
+
+## A broken link and the pages that link to it.
+pub class BrokenLink {
+    pub let outcome: Outcome;
+    pub let pages: list[string];
+
+    pub func constructor(outcome: Outcome, pages: list[string]) {
+        this.outcome = outcome;
+        this.pages = pages;
+    }
+}
+
+## Everything the reports need, sorted by URL.
+pub class Summary {
+    pub let start: string;
+    pub let max_depth: int;
+    pub let workers: int;
+    pub let pages_read: int;
+    pub let checked: list[Outcome];
+    pub let broken: list[BrokenLink];
+    # Why links were not checked ("external", "not http", "excluded"), and
+    # how many each.
+    pub let skipped: dict[string, int];
+    pub let ignored: int;
+
+    pub func constructor(start: string, settings: CrawlSettings, pages_read: int, checked: list[Outcome],
+            broken: list[BrokenLink], skipped: dict[string, int], ignored: int) {
+        this.start = start;
+        this.max_depth = settings.max_depth;
+        this.workers = settings.workers;
+        this.pages_read = pages_read;
+        this.checked = checked;
+        this.broken = broken;
+        this.skipped = skipped;
+        this.ignored = ignored;
+    }
+
+    pub func skipped_count(): int {
+        var total = 0;
+        for (reason in this.skipped.keys()) {
+            total += this.skipped[reason];
+        }
+        return total;
+    }
+}
+
+struct Job {
+    url: string;
+    depth: int;
+}
+
+# A check's outcome, and the reply it ended with (None when there was none).
+class Checked {
+    pub let outcome: Outcome;
+    pub let reply: Option[HttpReply];
+
+    pub func constructor(outcome: Outcome, reply: Option[HttpReply]) {
+        this.outcome = outcome;
+        this.reply = reply;
+    }
+}
+
+pub class Crawler {
+    let fetcher: Fetcher;
+    let settings: CrawlSettings;
+    pub let start: string;
+    # Pages with the start page's origin are read for links.
+    let origin: string;
+
+    # Shared by the workers.
+    let known: set[string] = set[string]();
+    let queue: list[Job] = [];
+    let next_queue: list[Job] = [];
+    let outcomes: dict[string, Outcome] = {};
+    let broken: set[string] = set[string]();
+    let pages: set[string] = set[string]();
+    let referrers: dict[string, list[string]] = {};
+    let skipped: dict[string, string] = {};
+    let ignored: set[string] = set[string]();
+
+    ## A crawler of the site at `start`, an absolute http URL.
+    pub func constructor(fetcher: Fetcher, start: string, settings: CrawlSettings) {
+        this.fetcher = fetcher;
+        this.settings = settings;
+        this.start = normalize(Url.parse(start));
+        this.origin = origin_of(this.start);
+    }
+
+    ## Check the whole site, level by level.
+    pub async func crawl(): Task[void] {
+        this.known.add(this.start);
+        this.queue.push(Job(url = this.start, depth = 0));
+        while (this.queue.len() > 0) {
+            await group {
+                for (w in 0..this.settings.workers) {
+                    spawn this.work();
+                }
+            }
+            # The workers emptied this level's queue; the links they found
+            # are the next level.
+            while (this.next_queue.len() > 0) {
+                this.queue.push(this.next_queue.remove(0));
+            }
+        }
+    }
+
+    # One worker: take jobs until the queue is empty. Returns how many it did.
+    async func work(): Task[int] {
+        var done = 0;
+        while (true) {
+            var job: Option[Job] = None;
+            # Testing the length and taking the job must not be split by
+            # another worker's turn.
+            atomic {
+                if (this.queue.len() > 0) {
+                    job = Some(this.queue.remove(0));
+                }
+            }
+            match job {
+                Some(j) => {
+                    await this.visit(j);
+                    done += 1;
+                },
+                None => { return done; },
+            }
+        }
+        return done;
+    }
+
+    # Check one URL; read it for links if it is an HTML page of the site
+    # within the depth limit.
+    async func visit(job: Job): Task[void] {
+        let on_site = origin_of(job.url) == this.origin;
+        let method = if (on_site) { "GET" } else { "HEAD" };
+        let checked = await this.check(job.url, method);
+        this.record(checked.outcome);
+        let too_deep = this.settings.max_depth != UNLIMITED and job.depth > this.settings.max_depth;
+        if (!on_site or too_deep or checked.outcome.is_broken()) {
+            return;
+        }
+        # `?.` reaches into the Option: no reply is not a page either.
+        if (!(checked.reply?.is_html() ?? false)) {
+            return;
+        }
+        # A redirect may have left the site; such a page is checked, not read.
+        let page = checked.outcome.final_url;
+        if (origin_of(page) != this.origin) {
+            return;
+        }
+        # A page reached again through a redirect is not read twice.
+        var unread = false;
+        atomic {
+            if (!(page in this.pages)) {
+                this.pages.add(page);
+                unread = true;
+            }
+        }
+        if (!unread) {
+            return;
+        }
+        var base = Url.parse(page);
+        for (link in links_in(checked.reply.unwrap().body)) {
+            if (link.tag == "base") {
+                match resolve_text(page, link.value) {
+                    Some(b) => { base = Url.parse(b); },
+                    None => {},
+                }
+                continue;
+            }
+            this.found(page, base, link.value, job.depth + 1);
+        }
+    }
+
+    # A link on `page`: ignore it, or note its URL.
+    func found(page: string, base: Url, reference: string, depth: int): void {
+        match classify(base, reference) {
+            LinkTarget.Ignored => {
+                atomic {
+                    this.ignored.add(reference.trim());
+                }
+            },
+            LinkTarget.Malformed(text) => { this.note(page, text, depth, "malformed"); },
+            LinkTarget.Unsupported(url) => { this.note(page, url, depth, "not http"); },
+            LinkTarget.Web(url) => { this.note(page, url, depth, ""); },
+        }
+    }
+
+    # Remember that `page` links to `url`; the first page to find a URL
+    # decides what becomes of it: checked at once (malformed), skipped, or
+    # queued for the next level.
+    func note(page: string, url: string, depth: int, kind: string): void {
+        var first_sighting = false;
+        atomic {
+            var linking = this.referrers.get(url) ?? [];
+            if (!(page in linking)) {
+                linking.push(page);
+                this.referrers[url] = linking;
+            }
+            if (!(url in this.known)) {
+                this.known.add(url);
+                first_sighting = true;
+            }
+        }
+        if (!first_sighting) {
+            return;
+        }
+        if (kind == "malformed") {
+            this.record(Outcome(url, 0, "malformed URL", url, 0));
+            return;
+        }
+        let reason = this.skip_reason(url, kind);
+        atomic {
+            if (reason.len() > 0) {
+                this.skipped[url] = reason;
+            } else {
+                this.next_queue.push(Job(url = url, depth = depth));
+            }
+        }
+    }
+
+    # Why `url` is not checked, or "".
+    func skip_reason(url: string, kind: string): string {
+        for (prefix in this.settings.excludes) {
+            if (url.startsWith(prefix)) {
+                return "excluded";
+            }
+        }
+        if (kind.len() > 0) {
+            return kind;
+        }
+        if (origin_of(url) != this.origin and !this.settings.external) {
+            return "external";
+        }
+        return "";
+    }
+
+    # Fetch `url`, following redirects. HEAD falls back to GET for servers
+    # that refuse it (405, 501).
+    async func check(url: string, method: string): Task[Checked] {
+        var current = url;
+        var verb = method;
+        var hops = 0;
+        while (true) {
+            let answer = await this.fetcher.fetch(verb, current);
+            if (answer.is_err()) {
+                return Checked(Outcome(url, 0, answer.unwrap_err(), current, hops), None);
+            }
+            let reply = answer.unwrap();
+            let code = reply.status.code;
+            let target = reply.location();
+            if (reply.status.isRedirect() and code != 304 and target.is_some()) {
+                let next = resolve_text(current, target.unwrap()) ?? "";
+                # A redirect to something that cannot be fetched (https) ends
+                # here: the redirect itself is the answer.
+                if (next.startsWith("http://")) {
+                    if (hops >= MAX_REDIRECTS) {
+                        return Checked(Outcome(url, 0, "too many redirects", current, hops), None);
+                    }
+                    current = next;
+                    hops += 1;
+                    continue;
+                }
+            }
+            if (verb == "HEAD" and (code == 405 or code == 501)) {
+                verb = "GET";
+                continue;
+            }
+            return Checked(Outcome(url, code, reply.status.reason, current, hops), Some(reply));
+        }
+        return Checked(Outcome(url, 0, "no reply", current, hops), None);
+    }
+
+    # Keep an outcome; the table and the broken set change together.
+    func record(outcome: Outcome): void {
+        atomic {
+            this.outcomes[outcome.url] = outcome;
+            if (outcome.is_broken()) {
+                this.broken.add(outcome.url);
+            }
+        }
+        if (this.settings.verbose) {
+            let via = if (outcome.redirects > 0) { i" (redirected to {$ outcome.final_url $})" } else { "" };
+            printErr(i"{$ outcome.label() $}: {$ outcome.url $}{$ via $}");
+        }
+    }
+
+    ## The results, sorted by URL (pages by URL too), for the reports.
+    pub func summary(): Summary {
+        var urls: list[string] = [];
+        for (url in this.outcomes.keys()) {
+            urls.push(url);
+        }
+        urls.sort(func(a: string, b: string): int { return a.compareTo(b); });
+        var checked: list[Outcome] = [];
+        var broken: list[BrokenLink] = [];
+        for (url in urls) {
+            let outcome = this.outcomes[url];
+            checked.push(outcome);
+            if (url in this.broken) {
+                var linking: list[string] = [];
+                for (p in this.referrers.get(url) ?? []) {
+                    linking.push(p);
+                }
+                linking.sort(func(a: string, b: string): int { return a.compareTo(b); });
+                broken.push(BrokenLink(outcome, linking));
+            }
+        }
+        var skipped: dict[string, int] = {};
+        for (url in this.skipped.keys()) {
+            let reason = this.skipped[url];
+            skipped[reason] = (skipped.get(reason) ?? 0) + 1;
+        }
+        return Summary(this.start, this.settings, this.pages.len(), checked, broken, skipped, this.ignored.len());
+    }
+}

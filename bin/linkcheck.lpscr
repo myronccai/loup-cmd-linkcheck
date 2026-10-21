@@ -1,0 +1,84 @@
+#!/usr/bin/env -S loup-bootstrap run --deny-all --allow-fs --allow-net
+@mode(host.scripted)
+
+# linkcheck: check every link of a web site. Read each page of the site
+# that can be reached from a start URL, check every link and image on
+# them, and report the broken ones with the pages that refer to them.
+#
+# Runtime: host.scripted. Stage0 interprets this file from source with
+# `loup-bootstrap run --deny-all --allow-fs --allow-net bin/linkcheck.lpscr
+# -- ARGS`: the shebang line, `make run`, tests/e2e.sh and the CI smoke test
+# all run it that way. Its top-level statements run in order and there is
+# no compile step; one of them is a top-level `await`. The flags grant the
+# `fs` capability (for --html) and `net`, and nothing else; Stage0 enforces
+# them. The self-hosted `loup run` cannot run it on Linux x86-64: it has no
+# `net.tcp`, and it does not parse `await group`, `?.` or `in`.
+#
+# Structure: parse the command line (a usage error exits 2), answer --help
+# and --version, check that the network is granted and that the URL is an
+# http URL, crawl, then print the text report, write the HTML one, and exit
+# with 1 if anything is broken.
+
+from io.fs import (writeText);
+from ..lib.appinfo import (APP_NAME, USER_AGENT, EXIT_OK, EXIT_BROKEN, EXIT_USAGE);
+from ..lib.args import (Options, parse_args);
+from ..lib.usage import (usage, version_line);
+from ..lib.urls import (start_url_problem);
+from ..lib.fetch import (HttpFetcher, io_reason);
+from ..lib.crawler import (Crawler, CrawlSettings, Summary);
+from ..lib.report import (text_report, html_report);
+
+func usage_error(message: string): void {
+    printErr(i"{$ APP_NAME $}: {$ message $}");
+    printErr(i"Try '{$ APP_NAME $} --help' for more information.");
+    exit(EXIT_USAGE);
+}
+
+let parsed = parse_args(args());
+if (parsed.is_err()) {
+    usage_error(parsed.unwrap_err());
+}
+let opts: Options = parsed.unwrap();
+if (opts.help) {
+    println(usage());
+    exit(EXIT_OK);
+}
+if (opts.version) {
+    println(version_line());
+    exit(EXIT_OK);
+}
+match start_url_problem(opts.url) {
+    Some(problem) => { usage_error(problem); },
+    None => {},
+}
+if (!runtime.has("net")) {
+    printErr(i"{$ APP_NAME $}: network access is not granted: run linkcheck with `loup-bootstrap run --allow-net`");
+    exit(EXIT_USAGE);
+}
+
+let settings = CrawlSettings(
+    max_depth = opts.max_depth,
+    workers = opts.concurrency,
+    external = opts.external,
+    excludes = opts.excludes,
+    verbose = opts.verbose,
+);
+let crawler = Crawler(HttpFetcher(USER_AGENT), opts.url, settings);
+
+# The crawl's tasks run under this await, at the top level of the script.
+await crawler.crawl();
+
+let summary: Summary = crawler.summary();
+let text = text_report(summary, opts.quiet);
+if (text.len() > 0) {
+    println(text);
+}
+if (opts.html_file.len() > 0) {
+    try {
+        writeText(opts.html_file, html_report(summary));
+    } catch (IoError as e) {
+        printErr(i"{$ APP_NAME $}: cannot write {$ opts.html_file $}: {$ io_reason(e.message) $}");
+        exit(EXIT_USAGE);
+    }
+}
+exit(if (summary.broken.len() > 0) { EXIT_BROKEN } else { EXIT_OK });

@@ -1,0 +1,168 @@
+@mode(host.scripted)
+
+# Unit tests for linkcheck's crawler (lib/crawler.lpscr), against sites
+# held in memory (tests/fakesite.lpscr): what is read, checked, skipped
+# and ignored, the depth limit, redirects, HEAD for other sites, `<base>`,
+# exclusions, and that the number of workers changes nothing in the result.
+#
+# Runtime: host.scripted, run by the test runner: `make test` interprets
+# this file with Stage0 (`loup-bootstrap test --no-parallel --file
+# tests/crawler_test.lpscr`), one test per `func test_*()`. The tests are
+# async functions, which the runner awaits. No socket is opened; it is not
+# part of the program.
+
+from debug.assert import (expect, expectEq);
+from ..lib.args import (UNLIMITED);
+from ..lib.crawler import (Crawler, CrawlSettings, Summary, Outcome, BrokenLink);
+from .fakesite import (FakeSite);
+
+const ROOT: string = "http://site.test/";
+
+func settings(depth: int, workers: int, external: bool, excludes: list[string]): CrawlSettings {
+    return CrawlSettings(max_depth = depth, workers = workers, external = external, excludes = excludes, verbose = false);
+}
+
+func defaults(): CrawlSettings {
+    return settings(UNLIMITED, 4, false, []);
+}
+
+async func crawl(site: FakeSite, start: string, s: CrawlSettings): Task[Summary] {
+    let crawler = Crawler(site, start, s);
+    await crawler.crawl();
+    return crawler.summary();
+}
+
+# "URL label" for each checked link.
+func checked(summary: Summary): list[string] {
+    var out: list[string] = [];
+    for (o in summary.checked) {
+        out.push(i"{$ o.url $} {$ o.label() $}");
+    }
+    return out;
+}
+
+# "URL <- page, page" for each broken link.
+func broken(summary: Summary): list[string] {
+    var out: list[string] = [];
+    for (b in summary.broken) {
+        out.push(i"{$ b.outcome.url $} <- {$ b.pages.join(", ") $}");
+    }
+    return out;
+}
+
+func small_site(): FakeSite {
+    let site = FakeSite();
+    site.page(ROOT, "<a href='a.html'>a</a> <a href='gone.html'>gone</a> <img src='pic.png'> "
+        + "<a href='http://other.test/x'>other</a> <a href='https://site.test/s'>secure</a> "
+        + "<a href='mailto:me@site.test'>mail</a> <a href='#top'>top</a>");
+    site.page(ROOT + "a.html", "<a href='/'>home</a> <a href='gone.html'>gone again</a>");
+    site.file(ROOT + "pic.png", "image/png");
+    return site;
+}
+
+async func test_small_site(): Task[void] {
+    let site = small_site();
+    let s = await crawl(site, ROOT, defaults());
+    expectEq(s.start, ROOT, "start");
+    expectEq(s.pages_read, 2, "two pages");
+    expectEq(checked(s).join(" | "), "http://site.test/ 200 OK | http://site.test/a.html 200 OK | http://site.test/gone.html 404 Not Found | http://site.test/pic.png 200 OK", "checked");
+    expectEq(broken(s).join(" | "), "http://site.test/gone.html <- http://site.test/, http://site.test/a.html", "broken, with both pages");
+    expectEq(s.skipped["external"], 1, "the other site");
+    expectEq(s.skipped["not http"], 1, "https");
+    expectEq(s.skipped_count(), 2, "skipped");
+    expectEq(s.ignored, 2, "mailto and the fragment");
+    # Each URL was fetched once, with GET, and nothing on the other site.
+    expectEq(site.requests.len(), 4, "four requests");
+    expect(!site.requests.contains("GET http://other.test/x"), "external not fetched");
+}
+
+async func test_workers_change_nothing(): Task[void] {
+    let one = await crawl(small_site(), ROOT, settings(UNLIMITED, 1, false, []));
+    let many = await crawl(small_site(), ROOT, settings(UNLIMITED, 16, false, []));
+    expectEq(checked(many).join(" | "), checked(one).join(" | "), "same links");
+    expectEq(broken(many).join(" | "), broken(one).join(" | "), "same broken links");
+}
+
+func chain_site(): FakeSite {
+    let site = FakeSite();
+    site.page(ROOT, "<a href='p1.html'>1</a>");
+    site.page(ROOT + "p1.html", "<a href='p2.html'>2</a>");
+    site.page(ROOT + "p2.html", "<a href='p3.html'>3</a>");
+    site.page(ROOT + "p3.html", "<a href='p4.html'>4</a>");
+    return site;
+}
+
+async func test_depth(): Task[void] {
+    let zero = await crawl(chain_site(), ROOT, settings(0, 2, false, []));
+    expectEq(zero.pages_read, 1, "depth 0 reads the start page");
+    expectEq(zero.checked.len(), 2, "and checks its links");
+    let two = await crawl(chain_site(), ROOT, settings(2, 2, false, []));
+    expectEq(two.pages_read, 3, "depth 2 reads three pages");
+    expectEq(checked(two)[3], "http://site.test/p3.html 200 OK", "a page beyond the limit is checked");
+    let all = await crawl(chain_site(), ROOT, defaults());
+    expectEq(all.pages_read, 4, "no limit");
+    expectEq(broken(all).join(""), "http://site.test/p4.html <- http://site.test/p3.html", "the end of the chain");
+}
+
+async func test_redirects(): Task[void] {
+    let site = FakeSite();
+    site.page(ROOT, "<a href='old'>old</a> <a href='loop'>loop</a> <a href='secure'>secure</a> <a href='away'>away</a>");
+    site.redirect(ROOT + "old", "/older", 301);
+    site.redirect(ROOT + "older", "new.html", 302);
+    site.page(ROOT + "new.html", "<a href='from-new.html'>x</a>");
+    site.redirect(ROOT + "loop", "/loop", 302);
+    site.redirect(ROOT + "secure", "https://site.test/secure", 301);
+    site.redirect(ROOT + "away", "http://other.test/page", 302);
+    site.page("http://other.test/page", "<a href='never-read.html'>no</a>");
+    let s = await crawl(site, ROOT, defaults());
+    expectEq(checked(s).join(" | "), "http://site.test/ 200 OK | http://site.test/away 200 OK | http://site.test/from-new.html 404 Not Found | http://site.test/loop error: too many redirects | http://site.test/old 200 OK | http://site.test/secure 301 Moved Permanently", "outcomes");
+    expectEq(s.pages_read, 2, "the start page and new.html, through the redirect");
+    expect(!site.requests.contains("GET http://other.test/never-read.html"), "a page on another site is not read");
+}
+
+async func test_external(): Task[void] {
+    let site = FakeSite();
+    site.page(ROOT, "<a href='http://a.test/'>a</a> <a href='http://b.test/x'>b</a> <a href='http://c.test/'>c</a>");
+    site.page("http://a.test/", "<a href='http://a.test/deeper'>not followed</a>");
+    site.status_for("HEAD", "http://b.test/x", 405);
+    site.file("http://b.test/x", "text/plain");
+    site.refuse("http://c.test/");
+    let s = await crawl(site, ROOT, settings(UNLIMITED, 4, true, []));
+    expectEq(checked(s).join(" | "), "http://a.test/ 200 OK | http://b.test/x 200 OK | http://c.test/ error: Connection refused | http://site.test/ 200 OK", "outcomes");
+    expect(site.requests.contains("HEAD http://a.test/"), "HEAD for another site");
+    expect(site.requests.contains("GET http://b.test/x"), "GET after a 405");
+    expect(!site.requests.contains("HEAD http://a.test/deeper"), "other sites are not read");
+    expectEq(s.pages_read, 1, "only the site's own page");
+}
+
+async func test_base_and_excludes(): Task[void] {
+    let site = FakeSite();
+    site.page(ROOT, "<a href='docs/'>docs</a> <a href='private/x'>x</a>");
+    site.page(ROOT + "docs/", "<base href='/manual/'><a href='intro.html'>intro</a> <a href='../private/y'>y</a>");
+    site.page(ROOT + "manual/intro.html", "no links");
+    let s = await crawl(site, ROOT, settings(UNLIMITED, 2, false, ["http://site.test/private"]));
+    expectEq(checked(s).join(" | "), "http://site.test/ 200 OK | http://site.test/docs/ 200 OK | http://site.test/manual/intro.html 200 OK", "base applied");
+    expectEq(s.skipped["excluded"], 2, "both private links");
+}
+
+async func test_broken_start_and_malformed(): Task[void] {
+    let down = FakeSite();
+    down.refuse(ROOT);
+    let s = await crawl(down, ROOT, defaults());
+    expectEq(broken(s).join(""), "http://site.test/ <- ", "the start page itself, linked from nowhere");
+    let odd = FakeSite();
+    odd.page(ROOT, "<a href='http://[::1'>bad</a>");
+    let m = await crawl(odd, ROOT, defaults());
+    expectEq(checked(m)[0], "http://[::1 error: malformed URL", "a link that does not parse is broken");
+}
+
+func test_outcome(): void {
+    let fine = Outcome("http://h/", 200, "OK", "http://h/", 0);
+    expect(!fine.is_broken(), "200");
+    expectEq(fine.label(), "200 OK", "label");
+    let gone = Outcome("http://h/x", 410, "Gone", "http://h/x", 1);
+    expect(gone.is_broken(), "410");
+    let none = Outcome("http://h/y", 0, "Connection refused", "http://h/y", 0);
+    expect(none.is_broken(), "no reply");
+    expectEq(none.label(), "error: Connection refused", "error label");
+}

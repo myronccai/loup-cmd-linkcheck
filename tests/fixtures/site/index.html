@@ -1,0 +1,35 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>The fixture site</title>
+<link rel="stylesheet" href="style.css">
+<script src="/app.js"></script>
+<script>
+  // Markup in a script is text, not a link: <a href="in-script.html">.
+</script>
+</head>
+<body>
+<h1 id="top">The fixture site</h1>
+<img src="logo.svg" alt="logo">
+<img src='img/missing.png' alt="a missing image">
+<p>
+  <a href="about.html">About</a>,
+  <a href="./about.html#team">the team</a>,
+  <a href="about.html?from=home&amp;lang=en">about, with a query</a>,
+  <a href=docs/>the documentation</a>,
+  <a href="missing.html">a page that is gone</a>,
+  <a href="/redirect">a redirect</a>,
+  <a href="/loop">a redirect loop</a>,
+  <a href="/error">a server error</a>.
+</p>
+<p>
+  <a href="http://example.com/">An external site</a>,
+  <a href="https://example.org/page">a secure one</a>,
+  <a href="mailto:someone@example.com">mail</a>,
+  <a href="javascript:void(0)">a script link</a>,
+  <a href="#top">the top</a>.
+</p>
+<!-- <a href="commented-out.html">not a link</a> -->
+</body>
+</html>

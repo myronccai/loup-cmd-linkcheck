@@ -1,0 +1,186 @@
+@mode(host.scripted)
+
+# linkcheck's reports: the text one for the terminal and the HTML page of
+# --html, both from a crawl's Summary.
+#
+# Runtime: host.scripted. A module of the script bin/linkcheck.lpscr,
+# interpreted with it by Stage0 (`loup-bootstrap run --allow-net`), and
+# imported by tests/report_test.lpscr under `loup-bootstrap test`. A script
+# module because the HTML page is written with template fences whose
+# values go through the `escape` filter, which only Stage0 runs.
+#
+# Structure: the text report (summary line, broken links, hint); then the
+# HTML page: rows prepared as structs (a fence cannot nest one `{% for %}`
+# in another, so each broken link's list of pages is rendered first by its
+# own fence) and one fence for the page.
+
+from .crawler import (Summary, BrokenLink, Outcome);
+from .args import (UNLIMITED);
+
+func plural(n: int, word: string): string {
+    return if (n == 1) { i"1 {$ word $}" } else { i"{$ n $} {$ word $}s" };
+}
+
+## "3 skipped (2 external, 1 not http)", or "" when nothing was skipped.
+pub func skipped_phrase(summary: Summary): string {
+    let total = summary.skipped_count();
+    if (total == 0) {
+        return "";
+    }
+    var reasons: list[string] = [];
+    for (reason in summary.skipped.keys()) {
+        reasons.push(reason);
+    }
+    reasons.sort(func(a: string, b: string): int { return a.compareTo(b); });
+    var parts: list[string] = [];
+    for (reason in reasons) {
+        parts.push(i"{$ summary.skipped[reason] $} {$ reason $}");
+    }
+    return i"{$ total $} skipped ({$ parts.join(", ") $})";
+}
+
+## The counts in one sentence.
+pub func summary_line(summary: Summary): string {
+    var parts: list[string] = [i"{$ summary.broken.len() $} broken"];
+    let skipped = skipped_phrase(summary);
+    if (skipped.len() > 0) {
+        parts.push(skipped);
+    }
+    if (summary.ignored > 0) {
+        parts.push(i"{$ summary.ignored $} ignored");
+    }
+    return i"Read {$ plural(summary.pages_read, "page") $}, checked {$ plural(summary.checked.len(), "link") $}: {$ parts.join(", ") $}.";
+}
+
+## The lines of one broken link: its status and URL, then each page that
+## links to it.
+pub func broken_lines(link: BrokenLink): list[string] {
+    var lines: list[string] = [i"{$ link.outcome.label() $}  {$ link.outcome.url $}"];
+    for (page in link.pages) {
+        lines.push("    linked from " + page);
+    }
+    return lines;
+}
+
+## The text report. `quiet` keeps only the broken links.
+pub func text_report(summary: Summary, quiet: bool): string {
+    var lines: list[string] = [];
+    if (!quiet) {
+        lines.push("linkcheck " + summary.start);
+        lines.push(summary_line(summary));
+    }
+    for (link in summary.broken) {
+        if (!quiet) {
+            lines.push("");
+        }
+        for (line in broken_lines(link)) {
+            lines.push(line);
+        }
+    }
+    if (!quiet) {
+        if (summary.broken.len() == 0) {
+            lines.push("No broken links.");
+        }
+        if (summary.skipped.containsKey("external")) {
+            lines.push("");
+            lines.push("Links to other sites were not checked (--external checks them).");
+        }
+    }
+    return lines.join("\n");
+}
+
+# --- the HTML page -------------------------------------------------------------
+
+# A row of the table of checked links.
+struct CheckedRow {
+    url: string;
+    label: string;
+    css: string;
+}
+
+# A broken link, with its pages already rendered.
+struct BrokenRow {
+    url: string;
+    label: string;
+    pages: string;
+}
+
+# The pages linking to a broken link, as a list of links.
+func pages_list(pages: list[string]): string {
+    let fragment = ```(html):(none)
+    <ul>{% for (page in pages) %}<li><a href="{$ page | escape $}">{$ page | escape $}</a></li>{% end %}</ul>
+    ```;
+    return fragment.render({});
+}
+
+# The table of broken links. Each fence holds one `{% for %}`: two loops in
+# one fence, even one after the other, declare the same hidden iterator
+# twice (E_REDECLARED), so every table is a fence of its own.
+func broken_table(rows: list[BrokenRow]): string {
+    let table = ```(html):(none)
+    <table>
+    <tr><th>Link</th><th>Status</th><th>Linked from</th></tr>
+    {% for (row in rows) %}<tr class="broken"><td><a href="{$ row.url | escape $}">{$ row.url | escape $}</a></td><td>{$ row.label | escape $}</td><td>{$ row.pages $}</td></tr>
+    {% end %}</table>
+    ```;
+    return table.render({});
+}
+
+func checked_table(rows: list[CheckedRow]): string {
+    let table = ```(html):(none)
+    <table>
+    <tr><th>Link</th><th>Status</th></tr>
+    {% for (row in rows) %}<tr class="{$ row.css $}"><td><a href="{$ row.url | escape $}">{$ row.url | escape $}</a></td><td>{$ row.label | escape $}</td></tr>
+    {% end %}</table>
+    ```;
+    return table.render({});
+}
+
+func depth_text(summary: Summary): string {
+    return if (summary.max_depth == UNLIMITED) { "no limit" } else { str(summary.max_depth) };
+}
+
+## The HTML report: the summary, the broken links with the pages that link
+## to them, and every checked link with its status. Every value is escaped.
+pub func html_report(summary: Summary): string {
+    var broken: list[BrokenRow] = [];
+    for (link in summary.broken) {
+        broken.push(BrokenRow(url = link.outcome.url, label = link.outcome.label(), pages = pages_list(link.pages)));
+    }
+    var checked: list[CheckedRow] = [];
+    for (outcome in summary.checked) {
+        let css = if (outcome.is_broken()) { "broken" } else { "ok" };
+        checked.push(CheckedRow(url = outcome.url, label = outcome.label(), css = css));
+    }
+    let start = summary.start;
+    let counts = summary_line(summary);
+    let depth = depth_text(summary);
+    let none_broken = broken.len() == 0;
+    let broken_html = broken_table(broken);
+    let checked_html = checked_table(checked);
+    let page = ```(html):(none)
+    <!DOCTYPE html>
+    <html lang="en">
+    <head>
+    <meta charset="utf-8">
+    <title>Links of {$ start | escape $}</title>
+    <style>
+    body { font-family: sans-serif; margin: 2em; }
+    table { border-collapse: collapse; }
+    td, th { border: 1px solid #ccc; padding: 0.3em 0.6em; text-align: left; vertical-align: top; }
+    .broken { color: #a00; }
+    td ul { margin: 0; padding-left: 1.2em; }
+    </style>
+    </head>
+    <body>
+    <h1>Links of <a href="{$ start | escape $}">{$ start | escape $}</a></h1>
+    <p>{$ counts | escape $} Depth: {$ depth $}.</p>
+    <h2>Broken links</h2>
+    {% if (none_broken) %}<p>None.</p>{% else %}{$ broken_html $}{% end %}
+    <h2>Checked links</h2>
+    {$ checked_html $}
+    </body>
+    </html>
+    ```;
+    return page.render({}) + "\n";
+}

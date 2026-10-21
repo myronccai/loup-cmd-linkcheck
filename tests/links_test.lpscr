@@ -1,0 +1,77 @@
+@mode(host.scripted)
+
+# Unit tests for linkcheck's link extractor (lib/links.lpscr): which
+# elements and attributes link, quoting, character references, comments,
+# script and style text, and odd markup.
+#
+# Runtime: host.scripted, run by the test runner: `make test` interprets
+# this file with Stage0 (`loup-bootstrap test --no-parallel --file
+# tests/links_test.lpscr`), one test per `func test_*()`. It reads
+# tests/fixtures/site/index.html and imports lib/ by relative path; it is
+# not part of the program.
+
+from debug.assert import (expect, expectEq);
+from io.fs import (readText);
+from ..lib.links import (Link, links_in, decode_entities, is_link_attribute);
+
+# Every link as `tag.attribute=value`, joined with " | ".
+func found(html: string): string {
+    var out: list[string] = [];
+    for (link in links_in(html)) {
+        out.push(i"{$ link.tag $}.{$ link.attribute $}={$ link.value $}");
+    }
+    return out.join(" | ");
+}
+
+func test_elements(): void {
+    expectEq(found("<a href=\"a.html\">a</a><img src=\"i.png\"><link rel=x href=\"s.css\">"),
+        "a.href=a.html | img.src=i.png | link.href=s.css", "a, img, link");
+    expectEq(found("<script src=\"x.js\"></script><iframe src=f.html></iframe><base href=\"/b/\">"),
+        "script.src=x.js | iframe.src=f.html | base.href=/b/", "script, iframe, base");
+    expectEq(found("<a name=\"x\">no href</a><img alt=\"no src\"><div href=\"d.html\"></div><a src=\"s\">"), "", "nothing to follow");
+}
+
+func test_quoting_and_case(): void {
+    expectEq(found("<A HREF='single.html'>"), "a.href=single.html", "single quotes, upper case");
+    expectEq(found("<a href=bare.html>"), "a.href=bare.html", "unquoted");
+    expectEq(found("<a\nclass=\"x\"\nhref = \"spaced.html\" >"), "a.href=spaced.html", "spaces and newlines");
+    expectEq(found("<a href=\"has > inside.html\">"), "a.href=has > inside.html", "a > in quotes");
+    expectEq(found("<img src=\"x.png\"/>"), "img.src=x.png", "self-closing");
+    expectEq(found("<a href=\"\">empty</a><a href=\"  \">blank</a>"), "", "empty values");
+}
+
+func test_references(): void {
+    expectEq(found("<a href=\"q?a=1&amp;b=2\">"), "a.href=q?a=1&b=2", "&amp;");
+    expectEq(decode_entities("&lt;x&gt; &quot;y&quot; &#39;z&#x27;"), "<x> \"y\" 'z'", "named and numeric");
+    expectEq(decode_entities("a & b &unknown; &#xZZ; &"), "a & b &unknown; &#xZZ; &", "left alone");
+    expectEq(decode_entities("&#233;t&#xE9;"), "été", "non-ASCII");
+    expectEq(decode_entities("plain"), "plain", "nothing to do");
+}
+
+func test_skipped_text(): void {
+    expectEq(found("<!-- <a href=\"hidden.html\"> --><a href=\"shown.html\">"), "a.href=shown.html", "comment");
+    expectEq(found("<script>var s = '<a href=\"in-script.html\">';</script><a href=\"after.html\">"), "a.href=after.html", "script text");
+    expectEq(found("<STYLE>a[href=\"x\"] { }</STYLE><a href=\"y.html\">"), "a.href=y.html", "style text");
+    expectEq(found("<!DOCTYPE html><?xml x?></a><a href=\"z.html\">"), "a.href=z.html", "declarations and end tags");
+    expectEq(found("1 < 2 and <a href=\"ok.html\">"), "a.href=ok.html", "a lone <");
+    expectEq(found("<a href=\"unterminated"), "a.href=unterminated", "cut off");
+}
+
+func test_fixture_page(): void {
+    var values: list[string] = [];
+    for (link in links_in(readText("tests/fixtures/site/index.html"))) {
+        values.push(link.value);
+    }
+    expectEq(values.len(), 17, "every link of the index page");
+    expectEq(values[0], "style.css", "the stylesheet first");
+    expect(values.contains("about.html?from=home&lang=en"), "decoded query");
+    expect(!values.contains("commented-out.html"), "not the comment");
+    expect(!values.contains("in-script.html"), "not the script text");
+}
+
+func test_link_attributes(): void {
+    expect(is_link_attribute("a", "href"), "a href");
+    expect(is_link_attribute("source", "src"), "source src");
+    expect(!is_link_attribute("a", "src"), "a src");
+    expect(!is_link_attribute("img", "href"), "img href");
+}

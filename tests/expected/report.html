@@ -1,0 +1,49 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Links of @URL@/</title>
+<style>
+body { font-family: sans-serif; margin: 2em; }
+table { border-collapse: collapse; }
+td, th { border: 1px solid #ccc; padding: 0.3em 0.6em; text-align: left; vertical-align: top; }
+.broken { color: #a00; }
+td ul { margin: 0; padding-left: 1.2em; }
+</style>
+</head>
+<body>
+<h1>Links of <a href="@URL@/">@URL@/</a></h1>
+<p>Read 7 pages, checked 17 links: 6 broken, 3 skipped (2 external, 1 not http), 3 ignored. Depth: no limit.</p>
+<h2>Broken links</h2>
+<table>
+<tr><th>Link</th><th>Status</th><th>Linked from</th></tr>
+<tr class="broken"><td><a href="@URL@/docs/deep/two.html">@URL@/docs/deep/two.html</a></td><td>404 Not Found</td><td><ul><li><a href="@URL@/docs/deep/one.html">@URL@/docs/deep/one.html</a></li></ul></td></tr>
+<tr class="broken"><td><a href="@URL@/docs/diagram.svg">@URL@/docs/diagram.svg</a></td><td>404 Not Found</td><td><ul><li><a href="@URL@/docs/">@URL@/docs/</a></li></ul></td></tr>
+<tr class="broken"><td><a href="@URL@/error">@URL@/error</a></td><td>500 Internal Server Error</td><td><ul><li><a href="@URL@/">@URL@/</a></li><li><a href="@URL@/index.html">@URL@/index.html</a></li></ul></td></tr>
+<tr class="broken"><td><a href="@URL@/img/missing.png">@URL@/img/missing.png</a></td><td>404 Not Found</td><td><ul><li><a href="@URL@/">@URL@/</a></li><li><a href="@URL@/index.html">@URL@/index.html</a></li></ul></td></tr>
+<tr class="broken"><td><a href="@URL@/loop">@URL@/loop</a></td><td>error: too many redirects</td><td><ul><li><a href="@URL@/">@URL@/</a></li><li><a href="@URL@/index.html">@URL@/index.html</a></li></ul></td></tr>
+<tr class="broken"><td><a href="@URL@/missing.html">@URL@/missing.html</a></td><td>404 Not Found</td><td><ul><li><a href="@URL@/">@URL@/</a></li><li><a href="@URL@/about.html">@URL@/about.html</a></li><li><a href="@URL@/about.html?from=home&amp;lang=en">@URL@/about.html?from=home&amp;lang=en</a></li><li><a href="@URL@/index.html">@URL@/index.html</a></li></ul></td></tr>
+</table>
+<h2>Checked links</h2>
+<table>
+<tr><th>Link</th><th>Status</th></tr>
+<tr class="ok"><td><a href="@URL@/">@URL@/</a></td><td>200 OK</td></tr>
+<tr class="ok"><td><a href="@URL@/about.html">@URL@/about.html</a></td><td>200 OK</td></tr>
+<tr class="ok"><td><a href="@URL@/about.html?from=home&amp;lang=en">@URL@/about.html?from=home&amp;lang=en</a></td><td>200 OK</td></tr>
+<tr class="ok"><td><a href="@URL@/app.js">@URL@/app.js</a></td><td>200 OK</td></tr>
+<tr class="ok"><td><a href="@URL@/docs/">@URL@/docs/</a></td><td>200 OK</td></tr>
+<tr class="ok"><td><a href="@URL@/docs/deep/one.html">@URL@/docs/deep/one.html</a></td><td>200 OK</td></tr>
+<tr class="broken"><td><a href="@URL@/docs/deep/two.html">@URL@/docs/deep/two.html</a></td><td>404 Not Found</td></tr>
+<tr class="broken"><td><a href="@URL@/docs/diagram.svg">@URL@/docs/diagram.svg</a></td><td>404 Not Found</td></tr>
+<tr class="ok"><td><a href="@URL@/docs/guide.html">@URL@/docs/guide.html</a></td><td>200 OK</td></tr>
+<tr class="broken"><td><a href="@URL@/error">@URL@/error</a></td><td>500 Internal Server Error</td></tr>
+<tr class="broken"><td><a href="@URL@/img/missing.png">@URL@/img/missing.png</a></td><td>404 Not Found</td></tr>
+<tr class="ok"><td><a href="@URL@/index.html">@URL@/index.html</a></td><td>200 OK</td></tr>
+<tr class="ok"><td><a href="@URL@/logo.svg">@URL@/logo.svg</a></td><td>200 OK</td></tr>
+<tr class="broken"><td><a href="@URL@/loop">@URL@/loop</a></td><td>error: too many redirects</td></tr>
+<tr class="broken"><td><a href="@URL@/missing.html">@URL@/missing.html</a></td><td>404 Not Found</td></tr>
+<tr class="ok"><td><a href="@URL@/redirect">@URL@/redirect</a></td><td>200 OK</td></tr>
+<tr class="ok"><td><a href="@URL@/style.css">@URL@/style.css</a></td><td>200 OK</td></tr>
+</table>
+</body>
+</html>

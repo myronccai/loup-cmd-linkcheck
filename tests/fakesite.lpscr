@@ -1,0 +1,67 @@
+@mode(host.scripted)
+
+# A web site held in memory for the crawler and report unit tests: a
+# Fetcher (lib/fetch.lpscr) that answers from a table of URLs and records
+# every request it gets.
+#
+# Runtime: host.scripted. Imported by tests/crawler_test.lpscr and
+# tests/report_test.lpscr, which `make test` runs with Stage0
+# (`loup-bootstrap test --no-parallel --file ...`). It opens no socket.
+# Not part of the program.
+
+from net.http import (Headers, HttpStatus);
+from ..lib.fetch import (Fetcher);
+from ..lib.httpwire import (HttpReply);
+
+pub class FakeSite implements Fetcher {
+    # Replies by "METHOD URL" (for one method only) or by URL.
+    let replies: dict[string, HttpReply] = {};
+    # URLs where nothing answers.
+    let down: set[string] = set[string]();
+    pub let requests: list[string] = [];
+
+    pub func constructor() {}
+
+    func put(key: string, code: int, fields: list[(string, string)], body: string): void {
+        this.replies[key] = HttpReply(HttpStatus(code), Headers.fromPairs(fields), body);
+    }
+
+    pub func page(url: string, html: string): void {
+        this.put(url, 200, [("Content-Type", "text/html; charset=utf-8")], html);
+    }
+
+    pub func file(url: string, media_type: string): void {
+        this.put(url, 200, [("Content-Type", media_type)], "data");
+    }
+
+    pub func status(url: string, code: int): void {
+        this.put(url, code, [("Content-Type", "text/plain")], "");
+    }
+
+    pub func status_for(method: string, url: string, code: int): void {
+        this.put(method + " " + url, code, [], "");
+    }
+
+    pub func redirect(url: string, location: string, code: int): void {
+        this.put(url, code, [("Location", location)], "");
+    }
+
+    pub func refuse(url: string): void {
+        this.down.add(url);
+    }
+
+    pub async func fetch(method: string, url: string): Task[Result[HttpReply, string]] {
+        this.requests.push(method + " " + url);
+        if (url in this.down) {
+            return Err("Connection refused");
+        }
+        let specific = this.replies.get(method + " " + url);
+        if (specific.is_some()) {
+            return Ok(specific.unwrap());
+        }
+        return match this.replies.get(url) {
+            Some(reply) => Ok(reply),
+            None => Ok(HttpReply(HttpStatus(404), Headers(), "")),
+        };
+    }
+}

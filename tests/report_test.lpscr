@@ -1,0 +1,106 @@
+@mode(host.scripted)
+
+# Unit tests for linkcheck's reports (lib/report.lpscr): the summary line,
+# the text report in full and quiet, and the HTML page, whose values must
+# come out escaped. The summaries come from crawls of sites held in memory
+# (tests/fakesite.lpscr).
+#
+# Runtime: host.scripted, run by the test runner: `make test` interprets
+# this file with Stage0 (`loup-bootstrap test --no-parallel --file
+# tests/report_test.lpscr`), one test per `func test_*()`; the tests that
+# crawl are async functions, which the runner awaits. No socket is opened;
+# it is not part of the program.
+
+from debug.assert import (expect, expectEq);
+from ..lib.args import (UNLIMITED);
+from ..lib.crawler import (Crawler, CrawlSettings, Summary);
+from ..lib.report import (text_report, html_report, summary_line, skipped_phrase);
+from .fakesite import (FakeSite);
+
+const ROOT: string = "http://site.test/";
+
+async func summary_of(site: FakeSite, depth: int): Task[Summary] {
+    let s = CrawlSettings(max_depth = depth, workers = 2, external = false, excludes = [], verbose = false);
+    let crawler = Crawler(site, ROOT, s);
+    await crawler.crawl();
+    return crawler.summary();
+}
+
+func broken_site(): FakeSite {
+    let site = FakeSite();
+    site.page(ROOT, "<a href=\"a.html\">a</a> <a href=\"gone.html\">x</a> <a href=\"http://other.test/\">o</a> <a href=\"mailto:x@y\">m</a>");
+    site.page(ROOT + "a.html", "<a href=\"gone.html\">x</a> <a href=\"q?a=1&amp;b=<2>\">q</a>");
+    return site;
+}
+
+func clean_site(): FakeSite {
+    let site = FakeSite();
+    site.page(ROOT, "<a href=\"a.html\">a</a>");
+    site.page(ROOT + "a.html", "<a href=\"/\">home</a>");
+    return site;
+}
+
+async func test_text_report(): Task[void] {
+    let s = await summary_of(broken_site(), UNLIMITED);
+    expectEq(text_report(s, false), [
+        "linkcheck http://site.test/",
+        "Read 2 pages, checked 4 links: 2 broken, 1 skipped (1 external), 1 ignored.",
+        "",
+        "404 Not Found  http://site.test/gone.html",
+        "    linked from http://site.test/",
+        "    linked from http://site.test/a.html",
+        "",
+        "404 Not Found  http://site.test/q?a=1&b=<2>",
+        "    linked from http://site.test/a.html",
+        "",
+        "Links to other sites were not checked (--external checks them).",
+    ].join("\n"), "full report");
+}
+
+async func test_quiet_report(): Task[void] {
+    let s = await summary_of(broken_site(), UNLIMITED);
+    expectEq(text_report(s, true), [
+        "404 Not Found  http://site.test/gone.html",
+        "    linked from http://site.test/",
+        "    linked from http://site.test/a.html",
+        "404 Not Found  http://site.test/q?a=1&b=<2>",
+        "    linked from http://site.test/a.html",
+    ].join("\n"), "broken links only");
+    let clean = await summary_of(clean_site(), UNLIMITED);
+    expectEq(text_report(clean, true), "", "nothing at all");
+}
+
+async func test_clean_report(): Task[void] {
+    let s = await summary_of(clean_site(), UNLIMITED);
+    expectEq(text_report(s, false), "linkcheck http://site.test/\nRead 2 pages, checked 2 links: 0 broken.\nNo broken links.", "clean");
+    expectEq(skipped_phrase(s), "", "nothing skipped");
+}
+
+async func test_singular_counts(): Task[void] {
+    let site = FakeSite();
+    site.page(ROOT, "no links");
+    let s = await summary_of(site, UNLIMITED);
+    expectEq(summary_line(s), "Read 1 page, checked 1 link: 0 broken.", "one of each");
+}
+
+async func test_html_report(): Task[void] {
+    let s = await summary_of(broken_site(), 3);
+    let page = html_report(s);
+    expect(page.startsWith("<!DOCTYPE html>\n<html lang=\"en\">"), "a page");
+    expect(page.endsWith("</html>\n"), "ends with a newline");
+    expect(page.contains("<title>Links of http://site.test/</title>"), "title");
+    expect(page.contains("2 broken, 1 skipped (1 external), 1 ignored. Depth: 3.</p>"), "summary");
+    # The URL with & and <> appears escaped, as text and in the href.
+    expect(page.contains("<a href=\"http://site.test/q?a=1&amp;b=&lt;2&gt;\">http://site.test/q?a=1&amp;b=&lt;2&gt;</a>"), "escaped");
+    expect(!page.contains("b=<2>"), "never raw");
+    expect(page.contains("<td><ul><li><a href=\"http://site.test/\">http://site.test/</a></li><li><a href=\"http://site.test/a.html\">http://site.test/a.html</a></li></ul></td>"), "pages of a broken link");
+    expect(page.contains("<tr class=\"ok\"><td><a href=\"http://site.test/a.html\">http://site.test/a.html</a></td><td>200 OK</td></tr>"), "a checked link");
+    expect(!page.contains("<p>None.</p>"), "there are broken links");
+}
+
+async func test_html_report_clean(): Task[void] {
+    let page = html_report(await summary_of(clean_site(), UNLIMITED));
+    expect(page.contains("<h2>Broken links</h2>\n<p>None.</p>"), "none broken");
+    expect(page.contains("Depth: no limit."), "no depth limit");
+    expect(!page.contains("class=\"broken\""), "no broken rows");
+}

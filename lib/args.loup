@@ -1,0 +1,229 @@
+@mode(host.dual)
+
+# linkcheck's command-line parser: GNU getopt_long behaviour from a table of
+# option specs.
+#
+# Grammar: linkcheck [OPTION]... URL
+#   Short options cluster (`-ev`) and take a value attached or as the next
+#   word (`-d2`, `-d 2`); long options take `--name=value` or `--name value`
+#   and may be abbreviated to any unambiguous prefix (`--ext`). Options may
+#   follow the URL; `--` ends them. `-x`/`--exclude` may be repeated.
+#
+# Runtime: host.dual, but only ever interpreted here, by Stage0:
+# bin/linkcheck.lpscr imports it under `loup-bootstrap run --allow-net` and
+# tests/args_test.lpscr under `loup-bootstrap test`. Nothing in this project
+# compiles it.
+#
+# Structure: OPTION_SPECS lists every option once; find_long() and
+# find_short() look a word up in it; parse_args() collects the values by
+# key in one pass and then build_options() turns them into Options,
+# checking the numbers and the URL operand.
+
+from .appinfo import (DEFAULT_CONCURRENCY, MAX_CONCURRENCY);
+
+## An option: its letter, its long name, whether it takes a value, and the
+## key its values are collected under.
+pub struct OptionSpec {
+    pub letter: string;
+    pub name: string;
+    pub takes_value: bool;
+    pub key: string;
+}
+
+func spec(letter: string, name: string, takes_value: bool): OptionSpec {
+    return OptionSpec(letter = letter, name = name, takes_value = takes_value, key = name);
+}
+
+pub let OPTION_SPECS: list[OptionSpec] = [
+    spec("d", "max-depth", true),
+    spec("c", "concurrency", true),
+    spec("e", "external", false),
+    spec("x", "exclude", true),
+    spec("o", "html", true),
+    spec("q", "quiet", false),
+    spec("v", "verbose", false),
+    spec("h", "help", false),
+    spec("V", "version", false),
+];
+
+# No limit on the depth.
+pub const UNLIMITED: int = -1;
+
+pub struct Options {
+    pub var help: bool;
+    pub var version: bool;
+    pub var max_depth: int;
+    pub var concurrency: int;
+    pub var external: bool;
+    pub var excludes: list[string];
+    pub var html_file: string;
+    pub var quiet: bool;
+    pub var verbose: bool;
+    pub var url: string;
+}
+
+## The spec whose long name is `name` or starts with it, when exactly one
+## does; otherwise the error message (unknown or ambiguous).
+pub func find_long(name: string): Result[OptionSpec, string] {
+    var matches: list[OptionSpec] = [];
+    for (s in OPTION_SPECS) {
+        if (s.name == name) {
+            return Ok(s);
+        }
+        if (s.name.startsWith(name)) {
+            matches.push(s);
+        }
+    }
+    if (matches.len() == 1) {
+        return Ok(matches[0]);
+    }
+    if (matches.len() == 0) {
+        return Err(i"unrecognized option '--{$ name $}'");
+    }
+    var names: list[string] = [];
+    for (m in matches) {
+        names.push(i"'--{$ m.name $}'");
+    }
+    return Err(i"option '--{$ name $}' is ambiguous; possibilities: {$ names.join(" ") $}");
+}
+
+pub func find_short(letter: string): Option[OptionSpec] {
+    for (s in OPTION_SPECS) {
+        if (s.letter == letter) {
+            return Some(s);
+        }
+    }
+    return None;
+}
+
+## A whole number from `low` to `high`, or the error message naming `what`.
+pub func parse_count(text: string, what: string, low: int, high: int): Result[int, string] {
+    var digits = text.len() > 0 and text.len() <= 9;
+    for (ch in text) {
+        if (ch < "0" or ch > "9") {
+            digits = false;
+        }
+    }
+    if (!digits) {
+        return Err(i"invalid {$ what $}: '{$ text $}'");
+    }
+    let n = text.toInt();
+    if (n < low or n > high) {
+        return Err(i"invalid {$ what $}: '{$ text $}' ({$ low $} to {$ high $})");
+    }
+    return Ok(n);
+}
+
+func add_value(edits found: dict[string, list[string]], key: string, value: string): void {
+    var values = found.get(key) ?? [];
+    values.push(value);
+    found[key] = values;
+}
+
+# The last value given for `key` (a later option overrides an earlier one).
+func last_value(found: dict[string, list[string]], key: string): Option[string] {
+    return match found.get(key) {
+        Some(values) => Some(values[values.len() - 1]),
+        None => None,
+    };
+}
+
+func build_options(found: dict[string, list[string]], operands: list[string]): Result[Options, string] {
+    var o = Options(
+        help = found.containsKey("help"), version = found.containsKey("version"),
+        max_depth = UNLIMITED, concurrency = DEFAULT_CONCURRENCY,
+        external = found.containsKey("external"), excludes = found.get("exclude") ?? [],
+        html_file = last_value(found, "html") ?? "", quiet = found.containsKey("quiet"),
+        verbose = found.containsKey("verbose"), url = "",
+    );
+    if (o.help or o.version) {
+        return Ok(o);
+    }
+    match last_value(found, "max-depth") {
+        Some(text) => { o.max_depth = parse_count(text, "depth", 0, 1000)?; },
+        None => {},
+    }
+    match last_value(found, "concurrency") {
+        Some(text) => { o.concurrency = parse_count(text, "concurrency", 1, MAX_CONCURRENCY)?; },
+        None => {},
+    }
+    if (o.html_file.len() == 0 and found.containsKey("html")) {
+        return Err("--html needs a file name");
+    }
+    if (operands.len() == 0) {
+        return Err("missing URL");
+    }
+    if (operands.len() > 1) {
+        return Err(i"extra operand '{$ operands[1] $}'");
+    }
+    o.url = operands[0];
+    return Ok(o);
+}
+
+pub func parse_args(argv: list[string]): Result[Options, string] {
+    var found: dict[string, list[string]] = {};
+    var operands: list[string] = [];
+    var k = 0;
+    var options_done = false;
+    while (k < argv.len()) {
+        let word = argv[k];
+        k += 1;
+        if (options_done or word == "-" or !word.startsWith("-")) {
+            operands.push(word);
+        } else if (word == "--") {
+            options_done = true;
+        } else if (word.startsWith("--")) {
+            # --name, --name=value, or --name value.
+            var name = word.slice(2);
+            var value: Option[string] = None;
+            let eq = name.index_of("=");
+            if (eq >= 0) {
+                value = Some(name.slice(eq + 1));
+                name = name.slice(0, eq);
+            }
+            let s = find_long(name)?;
+            if (!s.takes_value) {
+                if (value.is_some()) {
+                    return Err(i"option '--{$ s.name $}' doesn't allow an argument");
+                }
+                add_value(edits: found, s.key, "");
+            } else {
+                if (value.is_none()) {
+                    if (k >= argv.len()) {
+                        return Err(i"option '--{$ s.name $}' requires an argument");
+                    }
+                    value = Some(argv[k]);
+                    k += 1;
+                }
+                add_value(edits: found, s.key, value.unwrap());
+            }
+        } else {
+            # A cluster of short options; a value option takes the rest of
+            # the word, or the next word.
+            var at = 1;
+            while (at < word.len()) {
+                let letter = word.slice(at, at + 1);
+                at += 1;
+                let s = match find_short(letter) {
+                    Some(found_spec) => found_spec,
+                    None => { return Err(i"invalid option -- '{$ letter $}'"); },
+                };
+                if (!s.takes_value) {
+                    add_value(edits: found, s.key, "");
+                    continue;
+                }
+                var value = word.slice(at);
+                if (value.len() == 0) {
+                    if (k >= argv.len()) {
+                        return Err(i"option requires an argument -- '{$ letter $}'");
+                    }
+                    value = argv[k];
+                    k += 1;
+                }
+                add_value(edits: found, s.key, value);
+                at = word.len();
+            }
+        }
+    }
+    return build_options(found, operands);
+}

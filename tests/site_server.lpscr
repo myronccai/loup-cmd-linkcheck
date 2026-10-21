@@ -1,0 +1,65 @@
+@mode(host.scripted)
+
+# A fixture web server for the end-to-end tests: net.http's serve() on
+# 127.0.0.1, answering with the files under a directory
+# (tests/fixtures/site), plus three routes that misbehave on purpose:
+# /redirect (302 to /about.html), /loop (a 302 to itself) and /error (500).
+#
+# Runtime: host.scripted. tests/e2e.sh starts it in the background with
+# `loup-bootstrap run --deny-all --allow-fs --allow-net
+# tests/site_server.lpscr -- PORT DIR` and kills it when the tests end. It
+# serves one connection at a time, forever. Not part of the program.
+
+from net.http import (Request, Response, serve, status);
+from io.fs import (isDir, isFile, readText);
+from io.path import (extname);
+
+let argv = args();
+if (argv.len() != 2) {
+    printErr("usage: site_server.lpscr PORT DIR");
+    exit(2);
+}
+let port = argv[0].toInt();
+let root = argv[1];
+
+func content_type(path: string): string {
+    return match extname(path) {
+        ".html" => "text/html; charset=utf-8",
+        ".css" => "text/css",
+        ".js" => "text/javascript",
+        ".svg" => "image/svg+xml",
+        _ => "text/plain",
+    };
+}
+
+func not_found(): Response {
+    return Response(404, "text/html; charset=utf-8", "<h1>Not Found</h1>\n");
+}
+
+func respond(req: Request): Response {
+    if (req.path == "/redirect") {
+        return Response.redirect("/about.html", 302);
+    }
+    if (req.path == "/loop") {
+        return Response.redirect("/loop", 302);
+    }
+    if (req.path == "/error") {
+        return status(500, "Internal Server Error\n");
+    }
+    if (req.path.contains("..")) {
+        return status(403, "Forbidden\n");
+    }
+    var path = root + req.path;
+    if (isDir(path)) {
+        if (!req.path.endsWith("/")) {
+            return Response.redirect(req.path + "/", 301);
+        }
+        path += "index.html";
+    }
+    if (!isFile(path)) {
+        return not_found();
+    }
+    return Response(200, content_type(path), readText(path));
+}
+
+serve("127.0.0.1", port, respond);

@@ -1,0 +1,222 @@
+@mode(host.scripted)
+
+# linkcheck's link extractor: a generator that walks an HTML page once and
+# yields each link (an `href` or `src` attribute of an element that links)
+# as it reaches it, so the crawler can act on each one before the next is
+# found.
+#
+# Runtime: host.scripted. A module of the script bin/linkcheck.lpscr,
+# interpreted with it by Stage0 (`loup-bootstrap run --allow-net`), and
+# imported by tests/links_test.lpscr under `loup-bootstrap test`. A script
+# module because it uses what only Stage0 runs: a generator (`gen func`,
+# `yield`) and the `in` operator.
+#
+# Structure: the element tables; decode_entities() for attribute values;
+# small scanning helpers over the page's characters; then links_in(), the
+# generator: comments, end tags and declarations are skipped, a start tag's
+# attributes are read one by one, and the text of `script` and `style` is
+# skipped. It is a tolerant tokenizer for finding links, not an HTML parser.
+
+## A link in a page: the element (lower case), the attribute, and the value
+## with its character references decoded.
+pub struct Link {
+    pub tag: string;
+    pub attribute: string;
+    pub value: string;
+}
+
+# The elements whose `href` is a link, and those whose `src` is.
+let HREF_ELEMENTS: list[string] = ["a", "area", "link", "base"];
+let SRC_ELEMENTS: list[string] = ["img", "script", "iframe", "frame", "source", "embed", "audio", "video", "track", "input"];
+# Elements whose content is text, not markup: nothing in it is a link.
+let RAW_TEXT_ELEMENTS: list[string] = ["script", "style"];
+
+# The named character references a link is likely to contain.
+let NAMED_REFERENCES: dict[string, string] = {
+    "amp": "&", "lt": "<", "gt": ">", "quot": "\"", "apos": "'", "nbsp": " ",
+};
+
+## Whether attribute `name` of element `tag` is a link.
+pub func is_link_attribute(tag: string, name: string): bool {
+    return (name == "href" and tag in HREF_ELEMENTS) or (name == "src" and tag in SRC_ELEMENTS);
+}
+
+# The character for a numeric reference's digits (`#38`, `#x26`), or None.
+func numeric_reference(body: string): Option[string] {
+    let hex = body.startsWith("#x") or body.startsWith("#X");
+    let digits = if (hex) { body.slice(2) } else { body.slice(1) };
+    if (digits.len() == 0 or digits.len() > 6) {
+        return None;
+    }
+    var code = 0;
+    for (ch in digits.toLowerCase()) {
+        let d = "0123456789abcdef".index_of(ch);
+        if (d < 0 or (!hex and d > 9)) {
+            return None;
+        }
+        code = code * (if (hex) { 16 } else { 10 }) + d;
+    }
+    if (code <= 0 or code > 0x10FFFF) {
+        return None;
+    }
+    return Some(str(char.of(code)));
+}
+
+## `text` with its character references (`&amp;`, `&#38;`, `&#x26;`)
+## replaced; a reference it does not know is left as it is.
+pub func decode_entities(text: string): string {
+    if (!("&" in text)) {
+        return text;
+    }
+    var out = "";
+    var rest = text;
+    while (true) {
+        let amp = rest.index_of("&");
+        if (amp < 0) {
+            break;
+        }
+        out += rest.slice(0, amp);
+        rest = rest.slice(amp);
+        let semi = rest.index_of(";");
+        var replaced = false;
+        if (semi > 1 and semi <= 10) {
+            let body = rest.slice(1, semi);
+            let named = NAMED_REFERENCES.get(body.toLowerCase());
+            let value = if (body.startsWith("#")) { numeric_reference(body) } else { named };
+            match value {
+                Some(ch) => {
+                    out += ch;
+                    rest = rest.slice(semi + 1);
+                    replaced = true;
+                },
+                None => {},
+            }
+        }
+        if (!replaced) {
+            out += "&";
+            rest = rest.slice(1);
+        }
+    }
+    return out + rest;
+}
+
+# --- scanning over the page's characters --------------------------------------
+
+func is_space(ch: string): bool {
+    return ch == " " or ch == "\t" or ch == "\n" or ch == "\r";
+}
+
+func is_name_char(ch: string): bool {
+    return !is_space(ch) and !(ch in [">", "/", "=", "\"", "'", "<"]);
+}
+
+# Whether `word` (lower case) is at `at`, ignoring the case of letters.
+func looking_at(cs: list[string], at: int, word: string): bool {
+    if (at + word.len() > cs.len()) {
+        return false;
+    }
+    var k = 0;
+    for (ch in word) {
+        if (cs[at + k].toLowerCase() != ch) {
+            return false;
+        }
+        k += 1;
+    }
+    return true;
+}
+
+# The first position at or after `at` where `word` is, or the end.
+func find_from(cs: list[string], at: int, word: string): int {
+    var k = at;
+    while (k < cs.len()) {
+        if (looking_at(cs, k, word)) {
+            return k;
+        }
+        k += 1;
+    }
+    return cs.len();
+}
+
+func skip_spaces(cs: list[string], at: int): int {
+    var k = at;
+    while (k < cs.len() and is_space(cs[k])) {
+        k += 1;
+    }
+    return k;
+}
+
+## Every link of `html`, in document order.
+pub gen func links_in(html: string): Iterable[Link] {
+    let cs = html.chars();
+    let n = cs.len();
+    var at = 0;
+    while (at < n) {
+        if (cs[at] != "<") {
+            at += 1;
+            continue;
+        }
+        # Comments, end tags, `<!DOCTYPE ...>` and `<?...?>` hold no links.
+        if (looking_at(cs, at, "<!--")) {
+            at = find_from(cs, at + 4, "-->") + 3;
+            continue;
+        }
+        let next = if (at + 1 < n) { cs[at + 1] } else { "" };
+        if (next == "/" or next == "!" or next == "?") {
+            at = find_from(cs, at + 1, ">") + 1;
+            continue;
+        }
+        if (!(next.toLowerCase() >= "a" and next.toLowerCase() <= "z")) {
+            at += 1;
+            continue;
+        }
+
+        # A start tag: its name, then its attributes up to `>`.
+        var k = at + 1;
+        var tag = "";
+        while (k < n and is_name_char(cs[k])) {
+            tag += cs[k].toLowerCase();
+            k += 1;
+        }
+        while (k < n and cs[k] != ">") {
+            k = skip_spaces(cs, k);
+            if (k >= n or cs[k] == ">") {
+                break;
+            }
+            if (!is_name_char(cs[k])) {
+                k += 1;
+                continue;
+            }
+            var name = "";
+            while (k < n and is_name_char(cs[k])) {
+                name += cs[k].toLowerCase();
+                k += 1;
+            }
+            k = skip_spaces(cs, k);
+            var value = "";
+            if (k < n and cs[k] == "=") {
+                k = skip_spaces(cs, k + 1);
+                if (k < n and (cs[k] == "\"" or cs[k] == "'")) {
+                    let quote = cs[k];
+                    k += 1;
+                    while (k < n and cs[k] != quote) {
+                        value += cs[k];
+                        k += 1;
+                    }
+                    k += 1;
+                } else {
+                    while (k < n and !is_space(cs[k]) and cs[k] != ">") {
+                        value += cs[k];
+                        k += 1;
+                    }
+                }
+            }
+            if (is_link_attribute(tag, name) and value.trim().len() > 0) {
+                yield Link(tag = tag, attribute = name, value = decode_entities(value));
+            }
+        }
+        at = k + 1;
+        if (tag in RAW_TEXT_ELEMENTS) {
+            at = find_from(cs, at, "</" + tag);
+        }
+    }
+}

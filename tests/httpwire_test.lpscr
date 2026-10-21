@@ -1,0 +1,108 @@
+@mode(host.scripted)
+
+# Unit tests for linkcheck's HTTP wire format (lib/httpwire.loup): the
+# request, the status line, header fields, chunked bodies, Content-Length,
+# bodiless replies and malformed ones.
+#
+# Runtime: host.scripted, run by the test runner: `make test` interprets
+# this file with Stage0 (`loup-bootstrap test --no-parallel --file
+# tests/httpwire_test.lpscr`), one test per `func test_*()`. It works on
+# bytes in memory and opens no socket; it is not part of the program.
+
+from debug.assert import (expect, expectEq);
+from net.addressing import (Url);
+from io.streams import (ByteWriter);
+from ..lib.httpwire import (HttpReply, make_request, request_text, header_end, parse_status_line, parse_headers, dechunk, parse_reply);
+
+func raw(text: string): bytes {
+    let w = ByteWriter();
+    w.writeString(text);
+    return w.toBytes();
+}
+
+func reply(text: string): HttpReply {
+    let parsed = parse_reply(raw(text), true);
+    expect(parsed.is_ok(), "parses");
+    return parsed.unwrap();
+}
+
+func failure(text: string, with_body: bool): string {
+    return match parse_reply(raw(text), with_body) {
+        Ok(r) => "parsed",
+        Err(why) => why,
+    };
+}
+
+func test_request(): void {
+    let req = make_request("GET", Url.parse("http://Example.com:8080/a%20b?q=1#frag"), "agent/1");
+    expectEq(request_text(req), "GET /a%20b?q=1 HTTP/1.1\r\nHost: example.com:8080\r\nUser-Agent: agent/1\r\nAccept: */*\r\nConnection: close\r\n\r\n", "request");
+    let head = make_request("head", Url.parse("http://h"), "a");
+    expectEq(request_text(head).split("\r\n")[0], "HEAD / HTTP/1.1", "method upper-cased, empty path is /");
+    expectEq(head.headers.get("Host") ?? "", "h", "default port not written");
+}
+
+func test_header_end(): void {
+    expectEq(header_end(raw("HTTP/1.1 200 OK\r\nA: b\r\n\r\nbody")), 25, "CR LF");
+    expectEq(header_end(raw("HTTP/1.0 200 OK\n\nbody")), 17, "bare LF");
+    expectEq(header_end(raw("HTTP/1.1 200 OK\r\nA: b\r\n")), -1, "no blank line");
+}
+
+func test_status_line(): void {
+    let (code, reason) = parse_status_line("HTTP/1.1 404 Not Found").unwrap();
+    expectEq(code, 404, "code");
+    expectEq(reason, "Not Found", "reason");
+    expectEq(parse_status_line("HTTP/1.0 200").unwrap().1, "", "no reason");
+    expectEq(parse_status_line("SSH-2.0-OpenSSH").unwrap_err(), "not an HTTP reply", "another protocol");
+    expectEq(parse_status_line("HTTP/1.1 2xx OK").unwrap_err(), "malformed status line", "letters");
+}
+
+func test_headers(): void {
+    let h = parse_headers(["Content-Type: text/html; charset=utf-8", "Set-Cookie: a=1", "set-cookie: b=2", "garbage", "X-Empty:"]);
+    expectEq(h.get("content-type") ?? "", "text/html; charset=utf-8", "case-insensitive");
+    expectEq(h.getAll("Set-Cookie").join(","), "a=1,b=2", "repeated name");
+    expect(!h.contains("garbage"), "line without a colon");
+    expectEq(h.get("X-Empty") ?? "none", "", "empty value");
+}
+
+func test_dechunk(): void {
+    expectEq(dechunk(raw("4\r\nWiki\r\n6;ext=1\r\npedia \r\nE\r\nin \r\n\r\nchunks.\r\n0\r\n\r\n")).unwrap().decode(), "Wikipedia in \r\n\r\nchunks.", "the classic example");
+    expectEq(dechunk(raw("0\r\n\r\n")).unwrap().len(), 0, "empty");
+    expectEq(dechunk(raw("zz\r\nabc\r\n")).unwrap_err(), "malformed chunked body", "bad size");
+    expectEq(dechunk(raw("a\r\nabc")).unwrap_err(), "truncated chunked body", "short chunk");
+    expectEq(dechunk(raw("3\r\nabc\r\n")).unwrap_err(), "malformed chunked body", "no last chunk");
+}
+
+func test_parse_reply(): void {
+    let r = reply("HTTP/1.1 200 OK\r\nContent-Type: Text/HTML; charset=utf-8\r\nContent-Length: 5\r\n\r\nhello and more");
+    expectEq(r.status.code, 200, "status");
+    expectEq(r.status.toString(), "200 OK", "label");
+    expectEq(r.body, "hello", "Content-Length cuts the body");
+    expectEq(r.media_type(), "text/html", "media type");
+    expect(r.is_html(), "html");
+    let chunked = reply("HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n3\r\nabc\r\n0\r\n\r\n");
+    expectEq(chunked.body, "abc", "chunked");
+    let moved = reply("HTTP/1.1 301 Moved Permanently\r\nLocation: /new\r\n\r\n");
+    expect(moved.status.isRedirect(), "redirect");
+    expectEq(moved.location() ?? "", "/new", "location");
+    expect(!moved.is_html(), "no type, not html");
+}
+
+func test_bodiless_replies(): void {
+    let head = parse_reply(raw("HTTP/1.1 200 OK\r\nContent-Length: 99\r\n\r\n"), false).unwrap();
+    expectEq(head.body, "", "a reply to HEAD");
+    expectEq(reply("HTTP/1.1 304 Not Modified\r\n\r\nstray").body, "", "304");
+    expectEq(reply("HTTP/1.1 204 No Content\r\n\r\nstray").body, "", "204");
+}
+
+func test_unusual_status(): void {
+    let r = reply("HTTP/1.1 599 Network Timeout\r\n\r\n");
+    expectEq(r.status.reason, "Network Timeout", "the server's phrase for a code net.http does not know");
+    expectEq(reply("HTTP/1.1 404 Nope\r\n\r\n").status.reason, "Not Found", "the standard phrase otherwise");
+}
+
+func test_malformed(): void {
+    expectEq(failure("", true), "empty reply", "nothing");
+    expectEq(failure("HTTP/1.1 200 OK\r\nno end", true), "malformed reply", "no blank line");
+    expectEq(failure("hello\r\n\r\n", true), "not an HTTP reply", "not HTTP");
+    expectEq(failure("HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\nxyz\r\n", true), "malformed chunked body", "bad chunks");
+}
